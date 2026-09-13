@@ -1419,7 +1419,7 @@ fn checked_private_temp_name(
     let opened = file.metadata().map_err(|error| {
         format!("failed to inspect opened temporary Petri configuration: {error}")
     })?;
-    if named.st_dev != opened.dev()
+    if named.st_dev as u64 != opened.dev()
         || named.st_ino != opened.ino()
         || named.st_mode & libc::S_IFMT != libc::S_IFREG
     {
@@ -1519,7 +1519,47 @@ fn sync_config_parent(_directory: &File) -> Result<(), String> {
     Ok(())
 }
 
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Locks are stable files, never renamed or removed while another process may
+/// hold them. Kernel locking is released automatically after a process crash.
+pub(crate) fn open_private_lock_file(path: &Path) -> Result<File, String> {
+    let path = normalize_config_write_path(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Lock path has no parent".to_string())?;
+    let _directory = open_or_create_config_parent(parent)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options
+        .open(&path)
+        .map_err(|_| "Could not open operation lock".to_string())?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Could not inspect operation lock".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Operation lock is not a regular file".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err("Operation lock is a reparse point".into());
+        }
+    }
+    set_private_file_permissions(&file)?;
+    Ok(file)
+}
+
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let path = normalize_config_write_path(path)?;
     let parent = path
         .parent()

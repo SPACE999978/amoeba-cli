@@ -106,7 +106,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "ameba-sdk"
 version = "0.2.0"
-source = "git+https://github.com/SPACE999978/ameba_sdk.git?rev=ac30e32bbd151d8819e4a06eafdf33570bab0eab#ac30e32bbd151d8819e4a06eafdf33570bab0eab"
+source = "git+https://github.com/amoeba-farm/petri-sdk.git?rev=e600d19e64154a90f331171de32c2946956a74a5#e600d19e64154a90f331171de32c2946956a74a5"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "amoeba"
-version = "0.1.0"
+version = "0.1.5"
 dependencies = [
  "ameba-sdk",
  "base64 0.22.1",
@@ -139,6 +139,8 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "flate2",
+ "getrandom 0.3.4",
  "h2",
  "http",
  "libc",
@@ -152,6 +154,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "solana-derivation-path",
  "solana-ed25519-program",
  "solana-hash",
@@ -173,6 +176,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "winresource",
  "yaml-rust2",
+ "zip",
 ]
 
 [[package]]
@@ -2844,7 +2848,7 @@ dependencies = [
 [[package]]
 name = "light_token_minter"
 version = "0.2.0"
-source = "git+https://github.com/SPACE999978/ameba_spread.git?rev=60d7a856f627f880a62fb93c951a1252615e1198#60d7a856f627f880a62fb93c951a1252615e1198"
+source = "git+https://github.com/amoeba-farm/petri-sdk.git?rev=e600d19e64154a90f331171de32c2946956a74a5#e600d19e64154a90f331171de32c2946956a74a5"
 dependencies = [
  "borsh 0.10.4",
  "light-compressed-account",
@@ -6231,6 +6235,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
 name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6972,6 +6982,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "typed-path",
 ]
 
 [[package]]

@@ -193,20 +193,19 @@ fn draw_account_workspace(
         style(cli, Color::DarkGray),
     )));
     frame.render_widget(
-        Paragraph::new(scroll_lines_to_panel(
+        scrolling_panel(
             summary,
             layout.list,
             cli,
             app.focused_panel_scroll(LabFocus::Ledger),
             app.ledger_pane == LedgerPane::Actions,
-        ))
+        )
         .block(panel_block(
             cli,
             "Account",
             Color::Cyan,
             app.ledger_pane == LedgerPane::Actions,
-        ))
-        .wrap(Wrap { trim: true }),
+        )),
         layout.list,
     );
 
@@ -256,20 +255,19 @@ fn draw_account_workspace(
         details.extend(ledger_amoeba_activity_lines(cli, app).into_iter().take(8));
     }
     frame.render_widget(
-        Paragraph::new(scroll_lines_to_panel(
+        scrolling_panel(
             details,
             layout.detail,
             cli,
             app.focused_panel_scroll(LabFocus::Ledger),
             app.ledger_pane == LedgerPane::Detail,
-        ))
+        )
         .block(panel_block(
             cli,
             "Account detail & activity",
             Color::Blue,
             app.ledger_pane == LedgerPane::Detail,
-        ))
-        .wrap(Wrap { trim: true }),
+        )),
         layout.detail,
     );
 }
@@ -351,13 +349,13 @@ fn draw_positions_workspace(
 
     let detail = liquidity_detail_lines(cli, app, rows);
     frame.render_widget(
-        Paragraph::new(scroll_lines_to_panel(
+        scrolling_panel(
             detail,
             layout.detail,
             cli,
             app.focused_panel_scroll(LabFocus::Ledger),
             app.ledger_pane == LedgerPane::Detail,
-        ))
+        )
         .block(panel_block(
             cli,
             if app.liquidity_preview_form.is_some() {
@@ -369,8 +367,7 @@ fn draw_positions_workspace(
             },
             Color::Cyan,
             app.ledger_pane == LedgerPane::Detail || app.liquidity_preview_form.is_some(),
-        ))
-        .wrap(Wrap { trim: true }),
+        )),
         layout.detail,
     );
 }
@@ -450,11 +447,11 @@ pub(in super::super) fn liquidity_detail_lines(
     if app.liquidity_preview_is_running() {
         return vec![
             Line::from(format!(
-                "{} Loading unsigned Lean preview...",
+                "{} Preparing SDK-validated liquidity review...",
                 app.spinner()
             )),
             Line::from(Span::styled(
-                "Nothing is being prepared, signed, or submitted.",
+                "Nothing is being signed or submitted.",
                 style(cli, Color::DarkGray),
             )),
         ];
@@ -474,7 +471,7 @@ pub(in super::super) fn liquidity_detail_lines(
             Line::from(crate::backend::terminal_safe_text(&result.message)),
         ];
         if let Some(payload) = result.payload.as_ref() {
-            let request = payload.get("request").unwrap_or(payload);
+            let request = payload.get("review").unwrap_or(payload);
             lines.extend([
                 detail_line(
                     cli,
@@ -507,7 +504,7 @@ pub(in super::super) fn liquidity_detail_lines(
         lines.extend([
             Line::from(""),
             Line::from(Span::styled(
-                "Execution remains unavailable. This preview is not independently SDK-validated; signed=false, submitted=false.",
+                "F9 opens the exact SDK-validated review. Signing requires your explicit approval.",
                 style(cli, Color::Yellow),
             )),
         ]);
@@ -554,7 +551,7 @@ pub(in super::super) fn liquidity_detail_lines(
                 ),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Add, remove, and close execution are unavailable. An exact-input unsigned Lean preview is available in the Preview pane, but it is not independently SDK-validated.",
+                    "Prepare add, remove, or close from the Preview pane; F9 reviews and approves the exact action.",
                     style(cli, Color::Yellow),
                 )),
                 Line::from(Span::styled(
@@ -622,31 +619,30 @@ fn draw_writers_workspace(
     );
 
     frame.render_widget(
-        Paragraph::new(scroll_lines_to_panel(
+        scrolling_panel(
             writer_detail_lines(cli, app),
             layout.detail,
             cli,
             app.focused_panel_scroll(LabFocus::Ledger),
             app.ledger_pane == LedgerPane::Detail,
-        ))
+        )
         .block(panel_block(
             cli,
-            if app.writer_form.is_some() {
+            if app.writers.form.is_some() {
                 "Writer form"
             } else {
                 "Sleeve detail"
             },
             Color::Cyan,
-            app.ledger_pane == LedgerPane::Detail || app.writer_form.is_some(),
-        ))
-        .wrap(Wrap { trim: true }),
+            app.ledger_pane == LedgerPane::Detail || app.writers.form.is_some(),
+        )),
         layout.detail,
     );
 
     if let Some(actions_area) = layout.actions {
         let mut actions = Vec::new();
         for (index, action) in WriterAction::ALL.iter().copied().enumerate() {
-            let selected = index == app.writer_action_selected;
+            let selected = index == app.writers.action_selected;
             actions.push(selectable_line(
                 cli,
                 action.label(),
@@ -668,6 +664,8 @@ fn draw_writers_workspace(
             style(cli, Color::DarkGray),
         )));
         frame.render_widget(
+            // Scrolling and hit testing use one row per action. Wrapping labels
+            // breaks that correspondence and can hide the selected action.
             Paragraph::new(actions)
                 .scroll((writer_action_scroll_offset(actions_area, app) as u16, 0))
                 .block(panel_block(
@@ -675,8 +673,7 @@ fn draw_writers_workspace(
                     "Actions",
                     Color::Yellow,
                     app.ledger_pane == LedgerPane::Actions,
-                ))
-                .wrap(Wrap { trim: true }),
+                )),
             actions_area,
         );
     }
@@ -684,7 +681,7 @@ fn draw_writers_workspace(
 
 pub(in super::super) fn writer_detail_lines(cli: &Cli, app: &LabApp) -> Vec<Line<'static>> {
     let mut capability_lines = writer_capability_banner_lines(cli, app);
-    if let Some(form) = app.writer_form.as_ref() {
+    if let Some(form) = app.writers.form.as_ref() {
         capability_lines.push(Line::from(Span::styled(
             form.action.label(),
             style(cli, Color::Yellow).add_modifier(Modifier::BOLD),
@@ -738,7 +735,7 @@ pub(in super::super) fn writer_detail_lines(cli: &Cli, app: &LabApp) -> Vec<Line
         return lines;
     }
 
-    if let Some(result) = app.writer_action_result.as_ref() {
+    if let Some(result) = app.writers.action_result.as_ref() {
         capability_lines.extend([
             Line::from(Span::styled(
                 if result.ok { "READY" } else { "STOPPED" },
@@ -940,20 +937,19 @@ fn draw_history_workspace(
             ]
         });
     frame.render_widget(
-        Paragraph::new(scroll_lines_to_panel(
+        scrolling_panel(
             detail,
             layout.detail,
             cli,
             app.focused_panel_scroll(LabFocus::Ledger),
             app.ledger_pane == LedgerPane::Detail,
-        ))
+        )
         .block(panel_block(
             cli,
             "Activity detail",
             Color::Cyan,
             app.ledger_pane == LedgerPane::Detail,
-        ))
-        .wrap(Wrap { trim: true }),
+        )),
         layout.detail,
     );
 }
@@ -1072,7 +1068,8 @@ pub(in super::super) fn ledger_liquidity_action_hit_at(
 
 pub(in super::super) fn writer_action_scroll_offset(area: Rect, app: &LabApp) -> usize {
     let visible = panel_inner_height(area).max(1);
-    app.writer_action_selected
+    app.writers
+        .action_selected
         .saturating_sub(visible.saturating_sub(1))
 }
 
@@ -1135,7 +1132,7 @@ pub(in super::super) fn draw_writer_confirmation_modal(
     root: Rect,
     app: &LabApp,
 ) {
-    let Some(confirmation) = app.writer_confirmation.as_ref() else {
+    let Some(confirmation) = app.writers.confirmation.as_ref() else {
         return;
     };
     dim_tui_for_modal(frame, cli, root);

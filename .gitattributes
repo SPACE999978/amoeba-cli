@@ -8,6 +8,7 @@
 *.ico binary
 *.png binary
 *.zip binary
+*.zlib binary
 
 # The generator canonicalizes upstream UTF-8 legal text to LF before hashing.
 THIRD_PARTY_LICENSES.md text eol=lf

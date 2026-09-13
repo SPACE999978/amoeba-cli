@@ -13,6 +13,11 @@ use solana_pubkey::Pubkey;
 use crate::chain_identity;
 
 pub const SEMANTIC_ABI_VERSION: &str = "collective-operations-v1";
+pub const ACTION_SCHEMA_JSON: &str = include_str!("../schemas/collective-actions.v1.json");
+
+pub fn action_schema() -> Value {
+    serde_json::from_str(ACTION_SCHEMA_JSON).expect("bundled action schema")
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CollectiveActionKind {
@@ -34,7 +39,6 @@ pub enum CollectiveActionKind {
     UnstakeComplete,
     DisputeCommit,
     DisputeReveal,
-    SeatApprove,
     WriterLiquidityInitialize,
     WriterLiquidityAdd,
     WriterLiquidityRemove,
@@ -42,7 +46,7 @@ pub enum CollectiveActionKind {
 }
 
 impl CollectiveActionKind {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 22] = [
         Self::TradeBuy,
         Self::TradeSell,
         Self::AuctionBid,
@@ -61,7 +65,6 @@ impl CollectiveActionKind {
         Self::UnstakeComplete,
         Self::DisputeCommit,
         Self::DisputeReveal,
-        Self::SeatApprove,
         Self::WriterLiquidityInitialize,
         Self::WriterLiquidityAdd,
         Self::WriterLiquidityRemove,
@@ -88,7 +91,6 @@ impl CollectiveActionKind {
             Self::UnstakeComplete => "unstake_complete",
             Self::DisputeCommit => "dispute_commit",
             Self::DisputeReveal => "dispute_reveal",
-            Self::SeatApprove => "seat_approve",
             Self::WriterLiquidityInitialize => "writer_liquidity_initialize",
             Self::WriterLiquidityAdd => "writer_liquidity_add",
             Self::WriterLiquidityRemove => "writer_liquidity_remove",
@@ -158,6 +160,27 @@ pub fn validate_current_writer_action_mask(
     expected_owner: &str,
     expected_sleeve: &str,
 ) -> Result<WriterActionMask, String> {
+    let schema = action_schema();
+    let vocabulary = schema["actions"]
+        .as_array()
+        .ok_or("Action vocabulary is missing")?;
+    let encoded = serde_json::to_vec(vocabulary).map_err(|_| "Action vocabulary is malformed")?;
+    let digest: String = solana_program::hash::hash(&encoded)
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if schema["sdkCommit"] != crate::current_release::SDK_PACKAGE_COMMIT
+        || schema["semanticAbiVersion"] != SEMANTIC_ABI_VERSION
+        || schema["vocabularySha256"] != digest
+        || vocabulary.len() != CollectiveActionKind::ALL.len()
+        || vocabulary
+            .iter()
+            .zip(CollectiveActionKind::ALL)
+            .any(|(name, kind)| name.as_str() != Some(kind.wire_name()))
+    {
+        return Err("The packaged action contract does not match this release.".into());
+    }
     let root = if payload.get("ok").is_some() {
         chain_identity::validate_current_backend_envelope(payload)
             .map_err(|_| "writer action mask protocol identity is not current".to_string())?;
@@ -238,7 +261,7 @@ pub fn validate_current_writer_action_mask(
         .and_then(Value::as_array)
         .filter(|actions| actions.len() == CollectiveActionKind::ALL.len())
         .ok_or_else(|| {
-            "writer action mask must contain the exact 23-action vocabulary".to_string()
+            "writer action mask must contain the exact 22-action vocabulary".to_string()
         })?;
     let mut available_actions = Vec::with_capacity(raw_actions.len());
     for (index, raw) in raw_actions.iter().enumerate() {
@@ -303,13 +326,6 @@ pub fn validate_current_writer_action_mask(
             blocking_code,
             deadline,
         });
-    }
-
-    let claim_long = &available_actions[9];
-    if claim_long.enabled || claim_long.blocking_code.as_deref() != Some("ACTION_NOT_RELEASED") {
-        return Err(
-            "writer action mask attempted to release an unbound collective-long claim".to_string(),
-        );
     }
 
     Ok(WriterActionMask {

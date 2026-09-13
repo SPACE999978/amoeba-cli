@@ -1,12 +1,15 @@
 #![recursion_limit = "256"]
 
 mod agent_protocol;
+mod app_context;
 mod attached_wallet;
 mod backend;
+mod cache;
 mod catalog;
 mod chain_identity;
 mod chart;
 mod cli;
+mod content_hash;
 mod current_operation;
 mod current_release;
 mod endpoints;
@@ -14,14 +17,23 @@ mod gitbook;
 mod guide;
 mod lab;
 mod market_surface;
+mod mcp_actions;
 mod mcp_setup;
 mod onchain;
+mod operation_journal;
+mod oracle_carry;
+mod oracle_commitments;
 mod oracle_lifecycle;
 mod oracle_recipe_weights;
 mod oracle_submissions;
 mod oracle_tui;
+mod participation;
 mod petri_config;
+mod portable_operation;
 mod positions;
+mod release_update;
+mod request_validation;
+mod sdk_worker;
 mod solana_config;
 mod solana_history;
 mod solana_rpc;
@@ -29,6 +41,8 @@ mod spread_oracle_plan;
 mod staking;
 mod terminal_brand;
 mod terminal_keys;
+mod trade_service;
+mod update;
 mod wallet_balance;
 mod wallet_signer;
 mod wallet_terms;
@@ -47,9 +61,10 @@ use std::{
     str::FromStr,
 };
 
+use app_context::build_onchain_config;
 use backend::{
-    BackendClient, CliError, array_at_key, json_string, string_at_key, terminal_safe_text,
-    value_at_key,
+    BackendClient, CliError, array_at_key, current_backend_payload, json_string, string_at_key,
+    terminal_safe_text, unwrap_data, value_at_key,
 };
 use clap::{CommandFactory, FromArgMatches};
 use cli::{
@@ -66,13 +81,31 @@ use cli::{
 };
 use onchain::OnchainConfig;
 use oracle_submissions::{OracleSubmissionDraft, OracleSubmissionField};
+use request_validation::{canonical_pubkey_string, canonical_u64_string};
 use serde_json::{Value, json};
 use solana_program::hash::hashv;
 use solana_pubkey::Pubkey;
 
 fn main() {
+    if let Some(result) = release_update::helper_entry() {
+        if let Err(error) = result {
+            eprintln!("Petri update: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     windows_app_identity::apply();
     if let Err(error) = run() {
+        let arguments = env::args().collect::<Vec<_>>();
+        if arguments.iter().any(|a| a == "--json")
+            || arguments
+                .windows(2)
+                .any(|a| a[0] == "--output" && a[1] == "json")
+            || env::var("AMEBA_OUTPUT").ok().as_deref() == Some("json")
+        {
+            println!("{}", error.json());
+            std::process::exit(error.exit_code());
+        }
         if error.is_current_state_wait() {
             eprintln!("waiting: {error}");
             // A temporary finalized-observation wait is not a locally recoverable
@@ -81,145 +114,8 @@ fn main() {
             std::process::exit(75);
         }
         eprintln!("error: {error}");
-        std::process::exit(1);
+        std::process::exit(error.exit_code());
     }
-}
-
-fn current_backend_payload(payload: Value) -> Result<Value, CliError> {
-    chain_identity::validate_current_backend_envelope(&payload)?;
-    Ok(payload)
-}
-
-fn attached_wallet_pubkey(cli: &Cli) -> Result<String, CliError> {
-    let wallet = attached_wallet::inspect_attached_wallet(cli);
-    wallet.pubkey.ok_or_else(|| {
-        CliError::new(
-            wallet
-                .issue
-                .unwrap_or_else(|| "an attached wallet is required for this command".to_string()),
-        )
-    })
-}
-
-fn canonical_u64_string(raw: &str, label: &str, allow_zero: bool) -> Result<String, CliError> {
-    if raw.is_empty()
-        || (raw.len() > 1 && raw.starts_with('0'))
-        || !raw.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(CliError::new(format!(
-            "{label} must be a canonical unsigned decimal"
-        )));
-    }
-    let value = raw
-        .parse::<u64>()
-        .map_err(|_| CliError::new(format!("{label} is outside the u64 range")))?;
-    if !allow_zero && value == 0 {
-        return Err(CliError::new(format!("{label} must be greater than zero")));
-    }
-    Ok(value.to_string())
-}
-
-fn canonical_pubkey_string(raw: &str, label: &str) -> Result<String, CliError> {
-    let trimmed = raw.trim();
-    let pubkey = Pubkey::from_str(trimmed)
-        .map_err(|error| CliError::new(format!("invalid {label} public key: {error}")))?;
-    if pubkey.to_string() != trimmed {
-        return Err(CliError::new(format!(
-            "{label} public key is not canonical"
-        )));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn collective_trade_request(cli: &Cli, trade: &CollectiveTradeArgs) -> Result<Value, CliError> {
-    Ok(json!({
-        "trader": attached_wallet_pubkey(cli)?,
-        "market": canonical_pubkey_string(&trade.market, "market")?,
-        "direction": trade.direction.as_request_value(),
-        "amountIn": canonical_u64_string(&trade.amount_in, "amount-in", false)?,
-        "minimumAmountOut": canonical_u64_string(
-            &trade.minimum_amount_out,
-            "minimum-amount-out",
-            false,
-        )?,
-        "limitBinId": trade.limit_bin_id,
-    }))
-}
-
-fn validate_collective_trade_response(
-    response: &Value,
-    request: &Value,
-    context: &ameba_sdk::CurrentGovernedWriteContextV1,
-) -> Result<ameba_sdk::CurrentGovernedOperationV1, CliError> {
-    let data = unwrap_data(response);
-    let plan = data
-        .get("operationPlan")
-        .or_else(|| data.get("plan"))
-        .ok_or_else(|| CliError::new("collective trade response is missing operationPlan"))?;
-    let encoded = serde_json::to_string(plan).map_err(|error| {
-        CliError::new(format!(
-            "collective trade operationPlan could not be encoded: {error}"
-        ))
-    })?;
-    let admitted =
-        ameba_sdk::parse_current_governed_collective_swap_operation_json_v1(context, &encoded)
-            .map_err(|error| {
-                CliError::new(format!(
-                    "collective trade operationPlan failed pinned SDK validation: {error}"
-                ))
-            })?;
-    let validated = admitted
-        .swap_operation()
-        .ok_or_else(|| CliError::new("The SDK did not admit a collective swap."))?;
-    let direction = match request.get("direction").and_then(Value::as_str) {
-        Some("QuoteForOption") => ameba_sdk::CollectiveSwapDirection::QuoteForOption,
-        Some("OptionForQuote") => ameba_sdk::CollectiveSwapDirection::OptionForQuote,
-        _ => return Err(CliError::new("collective trade direction is invalid")),
-    };
-    let expected = ameba_sdk::ExpectedCollectiveSwapRequest {
-        trader: Pubkey::from_str(
-            request
-                .get("trader")
-                .and_then(Value::as_str)
-                .ok_or_else(|| CliError::new("collective trade request is missing trader"))?,
-        )
-        .map_err(|error| CliError::new(format!("invalid trader public key: {error}")))?,
-        market: Pubkey::from_str(
-            request
-                .get("market")
-                .and_then(Value::as_str)
-                .ok_or_else(|| CliError::new("collective trade request is missing market"))?,
-        )
-        .map_err(|error| CliError::new(format!("invalid market public key: {error}")))?,
-        direction,
-        amount_in: request
-            .get("amountIn")
-            .and_then(Value::as_str)
-            .and_then(|raw| raw.parse().ok())
-            .ok_or_else(|| CliError::new("collective trade request has invalid amountIn"))?,
-        minimum_amount_out: request
-            .get("minimumAmountOut")
-            .and_then(Value::as_str)
-            .and_then(|raw| raw.parse().ok())
-            .ok_or_else(|| {
-                CliError::new("collective trade request has invalid minimumAmountOut")
-            })?,
-        limit_bin_id: u16::try_from(
-            request
-                .get("limitBinId")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| CliError::new("collective trade request has invalid limitBinId"))?,
-        )
-        .map_err(|_| CliError::new("collective trade limitBinId exceeds u16"))?,
-    };
-    ameba_sdk::require_expected_collective_swap_request(&validated, &expected).map_err(
-        |error| {
-            CliError::new(format!(
-                "collective trade plan differs from the explicit request: {error}"
-            ))
-        },
-    )?;
-    Ok(admitted)
 }
 
 fn render_collective_trade_operation(label: &str, response: &Value) -> String {
@@ -245,14 +141,22 @@ fn run_collective_trade_prepare_command(
     backend: &BackendClient,
     trade: &CollectiveTradeArgs,
 ) -> Result<(), CliError> {
-    current_release::require_current_write_release()?;
-    let config = build_onchain_config(cli)?;
-    let context = current_operation::observe_current_write_context(&config)?;
-    let request = collective_trade_request(cli, trade)?;
-    let response = current_backend_payload(
-        backend.post_json_with_current_state_retry(endpoints::dlmm_trade_prepare(), &request)?,
-    )?;
-    validate_collective_trade_response(&response, &request, &context)?;
+    let trade_service::PreparedTrade {
+        request,
+        response,
+        admitted,
+        ..
+    } = trade_service::prepare_exact_input(cli, backend, trade)?;
+    if mcp_actions::preparing() {
+        let id = operation_journal::record_prepared(backend, &request, &response, &admitted)?;
+        let payload = json!({"ok":true,"operation":operation_journal::load(&id)?.public_value(),
+            "review":request,"signing":{"willSign":false,"willSubmit":false}});
+        return emit_output(
+            cli,
+            &payload,
+            render_collective_trade_operation("Collective swap prepared", &response),
+        );
+    }
     emit_output(
         cli,
         &response,
@@ -265,16 +169,12 @@ fn run_collective_trade_submit_command(
     backend: &BackendClient,
     trade: &CollectiveTradeArgs,
 ) -> Result<(), CliError> {
-    current_release::require_current_write_release()?;
-    let config = build_onchain_config(cli)?;
-    // Establish the deployment identity before resolving a hardware-wallet
-    // public key or asking Amoeba to prepare a wallet-bound plan.
-    let context = current_operation::observe_current_write_context(&config)?;
-    let request = collective_trade_request(cli, trade)?;
-    let response = current_backend_payload(
-        backend.post_json_with_current_state_retry(endpoints::dlmm_trade_prepare(), &request)?,
-    )?;
-    let admitted = validate_collective_trade_response(&response, &request, &context)?;
+    let trade_service::PreparedTrade {
+        config,
+        response: _,
+        request: _,
+        admitted,
+    } = trade_service::prepare_exact_input(cli, backend, trade)?;
     let validated = admitted
         .swap_operation()
         .ok_or_else(|| CliError::new("The SDK did not admit a collective swap."))?;
@@ -845,6 +745,17 @@ fn submit_writer_operation(
             "this writer operation requires multiple sequential Light setup batches; Petri will not sign a partially resumable direct flow. Prepare it after the input is hot; nothing was signed or sent",
         ));
     }
+    if mcp_actions::preparing() {
+        let id = operation_journal::record_prepared(backend, &request, &response, &admitted)?;
+        let payload = json!({"ok":true,"operation":operation_journal::load(&id)?.public_value(),
+            "review":request,"writerOperation":validated.plan.operation,"close":close,
+            "signing":{"willSign":false,"willSubmit":false},"nextStep":"Review then explicitly authorize operations.execute"});
+        return emit_output(
+            cli,
+            &payload,
+            format!("{label} prepared; nothing signed or submitted"),
+        );
+    }
     let status_path = endpoints::writer_operation_status(&validated.plan.operation_id);
     let receipt = current_operation::sign_submit_validated_operation(
         &config,
@@ -1070,6 +981,17 @@ fn submit_flat_transfer(cli: &Cli, backend: &BackendClient, body: Value) -> Resu
         return Err(CliError::new(
             "Flat transfer needs a fresh sequential Light-account preparation; nothing was signed or sent",
         ));
+    }
+    if mcp_actions::preparing() {
+        let id = operation_journal::record_prepared(backend, &request, &response, &admitted)?;
+        let payload = json!({"ok":true,"operation":operation_journal::load(&id)?.public_value(),
+            "review":expected,"signing":{"willSign":false,"willSubmit":false},
+            "nextStep":"Review then explicitly authorize operations.execute"});
+        return emit_output(
+            cli,
+            &payload,
+            "Flat transfer prepared; nothing signed or submitted".into(),
+        );
     }
     let status_path = endpoints::writer_operation_status(&validated.plan.operation_id);
     let receipt = current_operation::sign_submit_validated_operation(
@@ -1490,7 +1412,10 @@ fn run_writer_command(
 }
 
 fn run() -> Result<(), CliError> {
-    let cli = parse_cli();
+    dispatch_cli(parse_cli())
+}
+
+fn dispatch_cli(cli: Cli) -> Result<(), CliError> {
     if cli.command.is_none() {
         let payload = json!({
             "ok": true,
@@ -1531,6 +1456,69 @@ fn run() -> Result<(), CliError> {
         .expect("command is present or no-arg TUI path is active");
 
     match command {
+        Command::Commitments { command } => {
+            let value = oracle_commitments::run(command)?;
+            emit_output(
+                &cli,
+                &value,
+                serde_json::to_string_pretty(&value).unwrap_or_default(),
+            )?;
+        }
+        Command::Participate(args) => {
+            let value = participation::run(&build_onchain_config(&cli)?, &backend, args)?;
+            let output = if args.describe {
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            } else {
+                portable_operation::render(&value)
+            };
+            emit_output(&cli, &value, output)?;
+        }
+        Command::Operations { command } => {
+            use cli::OperationsCommand;
+            let payload = match command {
+                OperationsCommand::Execute { operation_id, yes } => portable_operation::execute(
+                    &build_onchain_config(&cli)?,
+                    &backend,
+                    operation_id,
+                    *yes,
+                )?,
+                OperationsCommand::List { owner } => operation_journal::list(owner.as_deref())?,
+                OperationsCommand::Show { operation_id } => {
+                    let record = operation_journal::load(operation_id)?;
+                    json!({"ok":true,"operation":record.public_value(),"review":record.request})
+                }
+                OperationsCommand::Resume { operation_id } => {
+                    operation_journal::recover(&backend, operation_id)?
+                }
+                OperationsCommand::Status {
+                    operation_id,
+                    watch,
+                } => {
+                    let mut result = operation_journal::recover(&backend, operation_id)?;
+                    for _ in 0..if *watch { 30 } else { 0 } {
+                        if matches!(
+                            result.pointer("/operation/state").and_then(Value::as_str),
+                            Some(
+                                "confirmed"
+                                    | "failed_on_chain"
+                                    | "rejected"
+                                    | "needs_fresh_preparation"
+                            )
+                        ) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        result = operation_journal::recover(&backend, operation_id)?;
+                    }
+                    result
+                }
+            };
+            emit_output(
+                &cli,
+                &payload,
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )?;
+        }
         Command::Markets { command } => match command {
             None => {
                 let payload = market_surface::dish_list_payload(&backend)?;
@@ -1579,6 +1567,42 @@ fn run() -> Result<(), CliError> {
             run_contracts_chain_command(&cli, &backend, &options)?;
         }
         Command::Trades { command } => match command {
+            TradesCommand::Quote { intent, side } => {
+                let payload = trade_service::prepare(
+                    &cli,
+                    &backend,
+                    intent,
+                    matches!(side, cli::TradeSide::Buy),
+                )?;
+                emit_output(&cli, &payload, trade_service::render_response(&payload))?;
+            }
+            TradesCommand::Buy { intent, yes } | TradesCommand::Sell { intent, yes } => {
+                let prepared = trade_service::prepare(
+                    &cli,
+                    &backend,
+                    intent,
+                    matches!(command, TradesCommand::Buy { .. }),
+                )?;
+                let payload = if *yes {
+                    trade_service::execute_reviewed(
+                        &cli,
+                        &backend,
+                        prepared["operationId"]
+                            .as_str()
+                            .ok_or_else(|| CliError::new("Prepared operation ID missing."))?,
+                    )?
+                } else {
+                    prepared
+                };
+                emit_output(&cli, &payload, trade_service::render_response(&payload))?;
+            }
+            TradesCommand::Execute { operation_id, yes } => {
+                if !yes {
+                    return Err(CliError::new("Explicit approval is required."));
+                }
+                let payload = trade_service::execute_reviewed(&cli, &backend, operation_id)?;
+                emit_output(&cli, &payload, trade_service::render_response(&payload))?;
+            }
             TradesCommand::Prepare { trade } => {
                 run_collective_trade_prepare_command(&cli, &backend, trade)?;
             }
@@ -1597,16 +1621,28 @@ fn run() -> Result<(), CliError> {
                     run_dlmm_liquidity_command(&cli, &backend, &liquidity, *action)?;
                 }
                 Some(LiquidityCommand::Add { liquidity }) => {
-                    let _ = liquidity;
-                    return Err(current_liquidity_submission_not_wired());
+                    run_dlmm_liquidity_command(
+                        &cli,
+                        &backend,
+                        liquidity,
+                        LiquidityActionValue::Add,
+                    )?;
                 }
                 Some(LiquidityCommand::Remove { liquidity }) => {
-                    let _ = liquidity;
-                    return Err(current_liquidity_submission_not_wired());
+                    run_dlmm_liquidity_command(
+                        &cli,
+                        &backend,
+                        liquidity,
+                        LiquidityActionValue::Remove,
+                    )?;
                 }
                 Some(LiquidityCommand::ClosePosition { liquidity }) => {
-                    let _ = liquidity;
-                    return Err(current_liquidity_submission_not_wired());
+                    run_dlmm_liquidity_command(
+                        &cli,
+                        &backend,
+                        liquidity,
+                        LiquidityActionValue::ClosePosition,
+                    )?;
                 }
             }
         }
@@ -1627,7 +1663,11 @@ fn run() -> Result<(), CliError> {
                 run_wallet_collateral_command(&cli, &backend, owner.as_deref())?
             }
         },
-        Command::Staking { command } => {
+        Command::Staking {
+            command,
+            market,
+            expiry,
+        } => {
             if matches!(
                 command,
                 Some(
@@ -1657,20 +1697,28 @@ fn run() -> Result<(), CliError> {
                     emit_output(&cli, &payload, staking::render_status(&result))?;
                 }
                 Some(StakingCommand::Stake { options }) => {
-                    let result = staking::stake(&config, &options.amount)?;
-                    let payload = serde_json::to_value(&result).map_err(|error| {
-                        CliError::new(format!("could not display staking result: {error}"))
-                    })?;
-                    emit_output(&cli, &payload, staking::render_transaction(&result))?;
+                    let value = participation::prepare_staking(
+                        &config,
+                        &backend,
+                        participation::Action::Stake,
+                        market.as_deref(),
+                        expiry.as_deref(),
+                        Some(&options.amount),
+                        None,
+                    )?;
+                    emit_output(&cli, &value, portable_operation::render(&value))?;
                 }
                 Some(StakingCommand::Activate { options }) => {
-                    let result = staking::activate(&config, options.min_received.as_deref())?;
-                    let payload = serde_json::to_value(&result).map_err(|error| {
-                        CliError::new(format!(
-                            "could not display staking activation result: {error}"
-                        ))
-                    })?;
-                    emit_output(&cli, &payload, staking::render_transaction(&result))?;
+                    let value = participation::prepare_staking(
+                        &config,
+                        &backend,
+                        participation::Action::ActivateStake,
+                        market.as_deref(),
+                        expiry.as_deref(),
+                        None,
+                        options.min_received.as_deref(),
+                    )?;
+                    emit_output(&cli, &value, portable_operation::render(&value))?;
                 }
                 Some(StakingCommand::Cancel) => {
                     let result = staking::cancel(&config)?;
@@ -1682,22 +1730,28 @@ fn run() -> Result<(), CliError> {
                     emit_output(&cli, &payload, staking::render_transaction(&result))?;
                 }
                 Some(StakingCommand::Unstake { options }) => {
-                    let result = staking::unstake(
+                    let value = participation::prepare_staking(
                         &config,
-                        &options.amount,
+                        &backend,
+                        participation::Action::Unstake,
+                        market.as_deref(),
+                        expiry.as_deref(),
+                        Some(&options.amount),
                         options.min_received.as_deref(),
                     )?;
-                    let payload = serde_json::to_value(&result).map_err(|error| {
-                        CliError::new(format!("could not display unstaking result: {error}"))
-                    })?;
-                    emit_output(&cli, &payload, staking::render_transaction(&result))?;
+                    emit_output(&cli, &value, portable_operation::render(&value))?;
                 }
                 Some(StakingCommand::Claim) => {
-                    let result = staking::claim(&config)?;
-                    let payload = serde_json::to_value(&result).map_err(|error| {
-                        CliError::new(format!("could not display unstaking claim: {error}"))
-                    })?;
-                    emit_output(&cli, &payload, staking::render_transaction(&result))?;
+                    let value = participation::prepare_staking(
+                        &config,
+                        &backend,
+                        participation::Action::CompleteUnstake,
+                        market.as_deref(),
+                        expiry.as_deref(),
+                        None,
+                        None,
+                    )?;
+                    emit_output(&cli, &value, portable_operation::render(&value))?;
                 }
             }
         }
@@ -1774,6 +1828,10 @@ fn run() -> Result<(), CliError> {
                 let tree = load_oracle_index_tree(&backend, "ramx")?;
                 let payload = build_oracle_recipe_payload(&tree, None, 24);
                 emit_output(&cli, &payload, render_oracle_recipe(&payload))?;
+            }
+            Some(OracleCommand::Carry(args)) => {
+                let value = oracle_carry::read(&build_onchain_config(&cli)?, &backend, args)?;
+                emit_output(&cli, &value, oracle_carry::render(&value))?;
             }
             Some(OracleCommand::State) => {
                 let payload =
@@ -1919,6 +1977,17 @@ fn run() -> Result<(), CliError> {
             },
         },
         Command::Mcp { command } => match command {
+            McpCommand::Actions => {
+                let payload = mcp_actions::manifest();
+                emit_output(
+                    &cli,
+                    &payload,
+                    serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                )?;
+            }
+            McpCommand::Invoke { action, .. } => {
+                mcp_actions::invoke_stdin(&cli, &backend, action)?;
+            }
             McpCommand::Status => {
                 let status = mcp_setup::status().map_err(|error| {
                     CliError::new(format!("could not read Petri MCP status: {error}"))
@@ -1961,7 +2030,7 @@ fn run() -> Result<(), CliError> {
                         "Connection check complete. Petri MCP is healthy; no settings were changed."
                     }
                     mcp_setup::McpRepairOutcome::Repaired => {
-                        "Repair complete. Petri MCP is healthy in review-only mode. Restart or reload an AI agent that is already open."
+                        "Repair complete. Petri MCP is healthy. Restart or reload an AI agent that is already open. Wallet execution requires explicit approval."
                     }
                 };
                 emit_output(
@@ -1999,7 +2068,48 @@ fn run() -> Result<(), CliError> {
             command,
             no_fetch,
             skip_shim,
+            yes,
+            restart,
         } => {
+            if matches!(command, Some(UpdateCommand::Info)) {
+                let info = release_update::information();
+                emit_output(
+                    &cli,
+                    &info,
+                    format!(
+                        "Petri {} | {} updates",
+                        env!("CARGO_PKG_VERSION"),
+                        if release_update::enabled() {
+                            "preview release"
+                        } else {
+                            "source"
+                        }
+                    ),
+                )?;
+                return Ok(());
+            }
+            if release_update::enabled() {
+                if *no_fetch || *skip_shim {
+                    return Err(CliError::new(
+                        "--no-fetch and --skip-shim apply only to source-checkout updates.",
+                    ));
+                }
+                let report = run_release_update(
+                    command.as_ref(),
+                    *yes,
+                    *restart,
+                    cli.resolved_output() == OutputFormat::Json,
+                )?;
+                let payload = serde_json::to_value(&report)
+                    .map_err(|_| CliError::new("Could not encode update status."))?;
+                emit_output(&cli, &payload, report.message)?;
+                return Ok(());
+            }
+            if matches!(command, Some(UpdateCommand::Recover)) || *yes || *restart {
+                return Err(CliError::new(
+                    "Recovery, --yes, and --restart apply only to standalone preview installations.",
+                ));
+            }
             let check_only = matches!(command.as_ref(), Some(UpdateCommand::Check));
             let report = if check_only {
                 workspace_update::check_workspace_update(*no_fetch)?
@@ -2080,6 +2190,9 @@ fn run() -> Result<(), CliError> {
 }
 
 fn handle_lab_exit_action(action: lab::LabExitAction) -> Result<(), CliError> {
+    if release_update::enabled() && matches!(action, lab::LabExitAction::RunUpdate) {
+        return run_petri_update_command();
+    }
     let launched_by_repo_launcher = env::var("PETRI_LAUNCHER").ok().as_deref() == Some("1");
     match lab_exit_route(action, launched_by_repo_launcher) {
         LabExitRoute::Quit => Ok(()),
@@ -2122,6 +2235,13 @@ fn lab_exit_route(action: lab::LabExitAction, launched_by_repo_launcher: bool) -
 }
 
 fn run_petri_update_command() -> Result<(), CliError> {
+    if release_update::enabled() {
+        // Stay in this process: a waiting parent executable would keep the
+        // Windows app locked while its update helper tries to replace it.
+        let report = run_release_update(None, false, true, false)?;
+        println!("{}", report.message);
+        return Ok(());
+    }
     let executable = env::current_exe()
         .map_err(|error| CliError::new(format!("failed to locate Petri: {error}")))?;
     println!("Running: petri update");
@@ -2140,6 +2260,65 @@ fn run_petri_update_command() -> Result<(), CliError> {
                 .unwrap_or_else(|| "unknown".to_string())
         )))
     }
+}
+
+fn confirm_app_update(message: &str, yes: bool, json: bool) -> Result<bool, CliError> {
+    if yes {
+        return Ok(true);
+    }
+    if json || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(CliError::new(
+            "Check the release with petri update check, then use petri update --yes to approve it.",
+        ));
+    }
+    use std::io::Write;
+    println!("{message}");
+    print!("Continue? [y/N] ");
+    io::stdout()
+        .flush()
+        .map_err(|_| CliError::new("Could not display update confirmation."))?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|_| CliError::new("Could not read update confirmation."))?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn run_release_update(
+    command: Option<&UpdateCommand>,
+    yes: bool,
+    restart: bool,
+    json: bool,
+) -> Result<release_update::Report, CliError> {
+    if matches!(command, Some(UpdateCommand::Recover)) {
+        if !confirm_app_update(
+            "Restore the saved previous Petri app files? Wallets and settings will not be changed.",
+            yes,
+            json,
+        )? {
+            return Err(CliError::new("Recovery cancelled. No files were changed."));
+        }
+        return release_update::recover(restart).map_err(CliError::new);
+    }
+    let report = release_update::check().map_err(CliError::new)?;
+    if matches!(command, Some(UpdateCommand::Check)) || !report.update_available {
+        return Ok(report);
+    }
+    let release = report
+        .release
+        .as_ref()
+        .ok_or_else(|| CliError::new("Missing release information."))?;
+    let prompt = format!(
+        "Install Petri {} from {}?\nThis Devnet preview is not publisher-signed or Apple-notarized. Petri verifies the official GitHub download and SHA-256 before replacing app files. Wallets and settings will not be changed.",
+        release.version, release.release_url
+    );
+    if !confirm_app_update(&prompt, yes, json)? {
+        return Err(CliError::new("Update cancelled. No files were changed."));
+    }
+    release_update::prepare(release, restart).map_err(CliError::new)
 }
 
 fn mcp_setup_payload(
@@ -5083,12 +5262,6 @@ fn render_oracle_draft_line(draft: &Value) -> String {
     format!("{id} | {action} | {node} | row={row} | {status}")
 }
 
-fn current_liquidity_submission_not_wired() -> CliError {
-    CliError::new(
-        "current manager-liquidity submission is unavailable in public Petri; 'petri liquidity plan' provides an unsigned Lean preview without independent SDK validation",
-    )
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CurrentLiquidityEntry {
     Add {
@@ -5112,9 +5285,15 @@ fn run_dlmm_liquidity_command(
     action: LiquidityActionValue,
 ) -> Result<(), CliError> {
     let config = build_onchain_config(cli)?;
+    crate::chain_identity::verify_onchain_config_fresh(&config)?;
     let payload = build_dlmm_liquidity_payload(&config, liquidity, action)?;
-    let response = prepare_backend_dlmm_liquidity_flow(backend, &payload)?;
-    emit_output(cli, &response, render_prepared_dlmm_liquidity(&response))
+    let response = portable_operation::prepare(
+        &config,
+        backend,
+        portable_operation::Family::Liquidity,
+        payload,
+    )?;
+    emit_output(cli, &response, portable_operation::render(&response))
 }
 
 fn build_dlmm_liquidity_payload(
@@ -5270,47 +5449,6 @@ fn parse_current_liquidity_u128(raw: &str, label: &str) -> Result<u128, CliError
 fn parse_current_liquidity_u64(raw: &str, label: &str) -> Result<u64, CliError> {
     let value = parse_current_liquidity_u128(raw, label)?;
     u64::try_from(value).map_err(|_| CliError::new(format!("{label} is outside the u64 range")))
-}
-
-fn request_backend_current_prepare(
-    backend: &BackendClient,
-    payload: &Value,
-    endpoint: &str,
-    operation: &str,
-) -> Result<Value, CliError> {
-    let response = backend.post_json_with_current_state_retry(endpoint, payload)?;
-    current_trade_response_data(response, operation)
-}
-
-fn request_backend_dlmm_liquidity_prepare(
-    backend: &BackendClient,
-    payload: &Value,
-) -> Result<Value, CliError> {
-    request_backend_current_prepare(
-        backend,
-        payload,
-        endpoints::dlmm_liquidity_prepare(),
-        "liquidity prepare",
-    )
-}
-
-fn prepare_backend_dlmm_liquidity_flow(
-    backend: &BackendClient,
-    payload: &Value,
-) -> Result<Value, CliError> {
-    let prepared = request_backend_dlmm_liquidity_prepare(backend, payload)?;
-    Ok(json!({
-        "request": payload,
-        "prepare": prepared,
-        "executionAuthority": {
-            "status": "not_wired",
-            "reason": "the canonical current launch-liquidity packet operator and lifecycle admission are TypeScript-only",
-        },
-        "signing": {
-            "willSign": false,
-            "willSubmit": false,
-        },
-    }))
 }
 
 fn normalized_oracle_phase(phase: &str) -> String {
@@ -5470,23 +5608,6 @@ fn authoritative_phase_is_game(phase: &str) -> bool {
     )
 }
 
-pub(crate) fn build_onchain_config(cli: &Cli) -> Result<OnchainConfig, CliError> {
-    let solana_cli_config = solana_config::load_solana_cli_config(cli.solana_config.as_deref())?;
-    Ok(OnchainConfig {
-        network: cli.cluster.clone(),
-        backend_url: cli.backend_url.clone(),
-        commitment: solana_config::resolve_commitment(
-            cli.commitment.as_deref(),
-            solana_cli_config.as_ref(),
-        ),
-        keypair_path: Some(solana_config::resolve_keypair_path(
-            cli.keypair.as_deref(),
-            solana_cli_config.as_ref(),
-        )),
-        allow_insecure_keypair: cli.allow_insecure_keypair,
-    })
-}
-
 fn load_keypair_pubkey(config: &OnchainConfig) -> Result<String, CliError> {
     wallet_signer::signer_pubkey(config)
 }
@@ -5592,10 +5713,6 @@ fn resolve_wallet_owner_pubkey(
     load_keypair_pubkey(config)
 }
 
-fn unwrap_data<'a>(payload: &'a Value) -> &'a Value {
-    value_at_key(payload, &["data"]).unwrap_or(payload)
-}
-
 fn parse_policy_pubkey(value: &str, label: &str) -> Result<Pubkey, CliError> {
     Pubkey::from_str(value.trim())
         .map_err(|error| CliError::new(format!("{label} is not a valid Solana address: {error}")))
@@ -5685,32 +5802,6 @@ fn bool_at_key(payload: &Value, keys: &[&str]) -> Option<bool> {
     })
 }
 
-fn render_prepared_dlmm_liquidity(payload: &Value) -> String {
-    let request = payload.get("request").unwrap_or(payload);
-    let field =
-        |value: &Value, key: &str| string_at_key(value, &[key]).unwrap_or_else(|| "-".to_string());
-    [
-        format!(
-            "manager liquidity parity only | {}/{} | owner={}",
-            field(request, "marketId"),
-            field(request, "expiryId"),
-            field(request, "ownerPubkey")
-        ),
-        format!(
-            "action={} | positionNonce={} | entries={} | managerOnly=true",
-            field(request, "action"),
-            field(request, "positionNonce"),
-            request
-                .get("entries")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len)
-        ),
-        "execution=not_wired | canonicalOperator=ameba-sdk/operator | maxSerializedPacketBytes=1232 | signed=false | submitted=false".to_string(),
-        "status=wait for the canonical ordered provision-before-activation packet plan; active markets cannot be paused or reprovisioned".to_string(),
-    ]
-    .join("\n")
-}
-
 fn emit_output(cli: &Cli, payload: &Value, plain: String) -> Result<(), CliError> {
     match cli.resolved_output() {
         OutputFormat::Plain => {
@@ -5719,6 +5810,13 @@ fn emit_output(cli: &Cli, payload: &Value, plain: String) -> Result<(), CliError
             }
         }
         OutputFormat::Json => {
+            let public;
+            let payload = if mcp_actions::active() {
+                public = mcp_actions::public_output(payload);
+                &public
+            } else {
+                payload
+            };
             println!("{}", json_string(payload)?);
         }
     }

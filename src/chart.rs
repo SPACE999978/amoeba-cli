@@ -58,32 +58,45 @@ struct ChartView {
 
 pub fn chart_endpoint(options: &ChartArgs) -> String {
     let window_ms = chart_query_window_ms(options.range);
-    endpoints::dlmm_market_chart(&options.market, window_ms)
-}
-
-fn validate_selected_series_scope(options: &ChartArgs, payload: &Value) -> Result<(), CliError> {
-    let Some(expiry_id) = options
+    let market = options.market.trim().to_ascii_lowercase();
+    match options
         .expiry
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(());
-    };
-    let data = unwrap_data(payload);
-    let history = value_at_key(data, &["history"]).unwrap_or(data);
-    let points = array_at_key(history, &["points", "history"]).ok_or_else(|| {
-        CliError::new("the current market chart response has no bounded points array")
-    })?;
-    if points.is_empty() {
-        return Ok(());
+        .filter(|id| !id.is_empty())
+    {
+        Some(expiry) => endpoints::dlmm_expiry_chart(&market, expiry, window_ms),
+        None => endpoints::dlmm_market_chart(&market, window_ms),
     }
-    if points
-        .iter()
-        .any(|point| point.get("expiryId").and_then(Value::as_str) != Some(expiry_id))
+}
+
+fn validate_selected_series_scope(options: &ChartArgs, payload: &Value) -> Result<(), CliError> {
+    let expiry_id = options
+        .expiry
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let data = unwrap_data(payload);
+    let market_id = options.market.trim().to_ascii_lowercase();
+    if data.get("marketId").and_then(Value::as_str) != Some(market_id.as_str())
+        || data.get("expiryId").and_then(Value::as_str) != expiry_id
+        || data.get("paperOnly").is_some()
     {
         return Err(CliError::new(
-            "the current market chart cannot prove that its observations belong to the selected series",
+            "Price history does not match the requested market and contract.",
+        ));
+    }
+    let points = array_at_key(data, &["points"]).ok_or_else(|| {
+        CliError::new("the current market chart response has no bounded points array")
+    })?;
+    if points.iter().any(|point| {
+        point.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+            || point.get("marketId").and_then(Value::as_str) != Some(market_id.as_str())
+            || point.get("expiryId").and_then(Value::as_str) != expiry_id
+            || parse_chart_point(point).is_none()
+    }) {
+        return Err(CliError::new(
+            "Price history contains invalid observations or belongs to a different contract.",
         ));
     }
     Ok(())
@@ -134,9 +147,11 @@ pub fn render_chart_static(_cli: &Cli, _backend: &BackendClient, fetch: &ChartFe
     }
 
     lines.push(chart_summary_line(&points, view.settlement_utc.as_deref()));
-    lines.push("legend: * fair price, + starting index, x overlap".to_string());
+    lines.push("legend: * fair price".to_string());
     lines.extend(render_ascii_chart(&points, options.height));
-    lines.push(render_ascii_volume_line(&points));
+    if points.iter().any(|point| point.volume_24h_usd.is_some()) {
+        lines.push(render_ascii_volume_line(&points));
+    }
     if let Some(latest) = points.last() {
         lines.push(format!("latest: {}", point_detail_line(latest)));
     }
@@ -229,11 +244,14 @@ impl ChartView {
                     .map(|value| value.trim().to_string())
             })
             .filter(|value| !value.is_empty());
-        let expiry_label = string_at_key(history, &["expiryLabel", "expiry_label", "label"]);
+        let latest = array_at_key(history, &["points"]).and_then(|points| points.last());
+        let expiry_label = string_at_key(history, &["expiryLabel", "expiry_label", "label"])
+            .or_else(|| latest.and_then(|point| string_at_key(point, &["expiryLabel"])));
         let settlement_utc = string_at_key(
             history,
             &["settlementUtc", "settlement_utc", "settlementTime"],
-        );
+        )
+        .or_else(|| latest.and_then(|point| string_at_key(point, &["settlementUtc"])));
         let mut points = array_at_key(history, &["points", "history"])
             .cloned()
             .unwrap_or_default()
@@ -265,16 +283,17 @@ pub fn draw_embedded_chart(
     chart: &EmbeddedChart,
     focused: bool,
 ) {
+    let points = chart.view.display_points(&chart.options);
+    let has_volume = points.iter().any(|point| point.volume_24h_usd.is_some());
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(7),
-            Constraint::Length(3),
+            Constraint::Length(if has_volume { 3 } else { 0 }),
             Constraint::Length(6),
         ])
         .split(area);
-    let points = chart.view.display_points(&chart.options);
     let header_title = if focused {
         "month chart *"
     } else {
@@ -345,7 +364,9 @@ pub fn draw_embedded_chart(
 
     draw_price_chart(frame, cli, areas[1], &points);
 
-    draw_volume_sparkline(frame, cli, areas[2], &points);
+    if has_volume {
+        draw_volume_sparkline(frame, cli, areas[2], &points);
+    }
 
     let details = Paragraph::new(detail_lines(
         &points,
@@ -371,25 +392,15 @@ fn draw_price_chart(frame: &mut Frame<'_>, cli: &Cli, area: Rect, points: &[Char
         .enumerate()
         .map(|(index, point)| (point_x(point, index), point.fair_price))
         .collect::<Vec<_>>();
-    let base_data = points
-        .iter()
-        .enumerate()
-        .filter_map(|(index, point)| {
-            point
-                .base_oracle
-                .map(|value| (point_x(point, index), value))
-        })
-        .collect::<Vec<_>>();
-
-    let mut values = points
+    let values = points
         .iter()
         .map(|point| point.fair_price)
         .collect::<Vec<_>>();
-    values.extend(points.iter().filter_map(|point| point.base_oracle));
     let (mut min_y, mut max_y) = min_max(&values).unwrap_or((0.0, 1.0));
     if (max_y - min_y).abs() < f64::EPSILON {
-        min_y -= 1.0;
-        max_y += 1.0;
+        let pad = (min_y.abs() * 0.08).max(0.000_001);
+        min_y = (min_y - pad).max(0.0);
+        max_y += pad;
     } else {
         let pad = (max_y - min_y) * 0.08;
         min_y -= pad;
@@ -403,24 +414,18 @@ fn draw_price_chart(frame: &mut Frame<'_>, cli: &Cli, area: Rect, points: &[Char
         max_x += 1.0;
     }
 
-    let mut datasets = vec![
+    let datasets = vec![
         Dataset::default()
             .name("fair")
             .marker(price_chart_marker_for_platform(cfg!(windows)))
-            .graph_type(GraphType::Line)
+            .graph_type(if points.len() == 1 {
+                GraphType::Scatter
+            } else {
+                GraphType::Line
+            })
             .style(chart_style(cli, Color::Yellow))
             .data(&fair_data),
     ];
-    if !base_data.is_empty() {
-        datasets.push(
-            Dataset::default()
-                .name("base")
-                .marker(price_chart_marker_for_platform(cfg!(windows)))
-                .graph_type(GraphType::Line)
-                .style(chart_style(cli, Color::Cyan))
-                .data(&base_data),
-        );
-    }
 
     let first_label = points
         .first()
@@ -533,7 +538,7 @@ fn detail_lines(
         Line::from(summary),
         Line::from(selected_line),
         Line::from(latest_line),
-        Line::from("Volume shows 0 when no trades are recorded for the selected window."),
+        Line::from("Oracle reference is shown separately from the contract price."),
         Line::from("Amoeba options have fixed maximum loss and no liquidation."),
     ]
 }
@@ -545,11 +550,10 @@ fn render_ascii_chart(points: &[ChartPoint], requested_height: usize) -> Vec<Str
         .unwrap_or(100);
     let width = terminal_width.saturating_sub(14).clamp(40, 120);
     let mut grid = vec![vec![' '; width]; height];
-    let mut values = points
+    let values = points
         .iter()
         .map(|point| point.fair_price)
         .collect::<Vec<_>>();
-    values.extend(points.iter().filter_map(|point| point.base_oracle));
     let (min_y, max_y) = min_max(&values).unwrap_or((0.0, 1.0));
     let y_for = |value: f64| -> usize {
         if (max_y - min_y).abs() < f64::EPSILON {
@@ -568,16 +572,9 @@ fn render_ascii_chart(points: &[ChartPoint], requested_height: usize) -> Vec<Str
     };
 
     for (index, point) in points.iter().enumerate() {
-        if let Some(base) = point.base_oracle {
-            let x = x_for(index);
-            let y = y_for(base);
-            grid[y][x] = '+';
-        }
-    }
-    for (index, point) in points.iter().enumerate() {
         let x = x_for(index);
         let y = y_for(point.fair_price);
-        grid[y][x] = if grid[y][x] == '+' { 'x' } else { '*' };
+        grid[y][x] = '*';
     }
 
     grid.into_iter()
@@ -659,34 +656,46 @@ fn volume_ascii_level(value: f64, max_value: f64) -> char {
 }
 
 fn parse_chart_point(value: &Value) -> Option<ChartPoint> {
-    let as_of = string_at_key(value, &["asOf", "as_of", "isoDate", "time"])?;
-    let fair_price = value_at_key(value, &["fairPrice", "fair_price", "fair", "close"])
-        .and_then(number_from_value)
-        .filter(|value| value.is_finite() && *value > 0.0)?;
+    // Use the same current exact-series, micro-unit history as the site's
+    // trading chart. Do not reinterpret oracle/index prices as option prices.
+    let as_of = value.get("asOf")?.as_str()?.to_string();
+    let timestamp_ms = parse_timestamp_ms(&as_of)?;
+    if timestamp_ms <= 0
+        || u128::try_from(timestamp_ms).ok()? != chart_atomic(value, "timestampMs")?
+    {
+        return None;
+    }
+    let fair_price = chart_atomic(value, "fairPriceMicros")? as f64 / 1_000_000.0;
+    if !fair_price.is_finite() || fair_price <= 0.0 {
+        return None;
+    }
+    let oracle = chart_atomic(value, "oraclePriceMicros")?;
+    let liquidity = chart_atomic(value, "liquidityQuoteAtomic")?;
+    let notional = chart_atomic(value, "notionalQuoteAtomic")?;
     Some(ChartPoint {
-        timestamp_ms: parse_timestamp_ms(&as_of),
+        timestamp_ms: Some(timestamp_ms),
         as_of,
         fair_price,
-        base_oracle: value_at_key(
-            value,
-            &["baseOracle", "base_oracle", "oracleReference", "open"],
-        )
-        .and_then(number_from_value),
-        volume_24h_usd: value_at_key(value, &["volume24hUsd", "volume_24h_usd", "volume24h"])
-            .and_then(number_from_value),
-        total_liquidity_usd: value_at_key(value, &["totalLiquidityUsd", "total_liquidity_usd"])
-            .and_then(number_from_value),
-        listed_notional: value_at_key(value, &["listedNotional", "listed_notional"])
-            .and_then(number_from_value),
-        best_call_bid: value_at_key(value, &["bestCallBid", "best_call_bid"])
-            .and_then(number_from_value),
-        best_call_ask: value_at_key(value, &["bestCallAsk", "best_call_ask"])
-            .and_then(number_from_value),
-        best_put_bid: value_at_key(value, &["bestPutBid", "best_put_bid"])
-            .and_then(number_from_value),
-        best_put_ask: value_at_key(value, &["bestPutAsk", "best_put_ask"])
-            .and_then(number_from_value),
+        base_oracle: (oracle > 0).then_some(oracle as f64 / 1_000_000.0),
+        volume_24h_usd: None,
+        total_liquidity_usd: Some(liquidity as f64 / 1_000_000.0),
+        listed_notional: Some(notional as f64 / 1_000_000.0),
+        best_call_bid: None,
+        best_call_ask: None,
+        best_put_bid: None,
+        best_put_ask: None,
     })
+}
+
+fn chart_atomic(value: &Value, key: &str) -> Option<u128> {
+    let raw = value.get(key)?.as_str()?;
+    if raw.is_empty()
+        || (raw.len() > 1 && raw.starts_with('0'))
+        || !raw.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    raw.parse().ok()
 }
 
 fn chart_query_window_ms(range: ChartRangeValue) -> Option<u64> {
@@ -719,19 +728,6 @@ fn chart_payload_has_points(options: &ChartArgs, payload: &Value) -> bool {
 
 fn unwrap_data(payload: &Value) -> &Value {
     value_at_key(payload, &["data"]).unwrap_or(payload)
-}
-
-fn number_from_value(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text
-            .trim()
-            .trim_start_matches('$')
-            .replace(',', "")
-            .parse::<f64>()
-            .ok(),
-        _ => None,
-    }
 }
 
 fn parse_timestamp_ms(value: &str) -> Option<i64> {
@@ -861,7 +857,7 @@ fn point_detail_line(point: &ChartPoint) -> String {
         format_axis_timestamp(point),
         format_decimal(point.fair_price, 3),
         format_optional_decimal(point.base_oracle, 3),
-        format_optional_usd(Some(point.volume_24h_usd.unwrap_or(0.0))),
+        format_optional_usd(point.volume_24h_usd),
         format_optional_usd(point.total_liquidity_usd),
         format_optional_decimal(point.best_call_bid, 3),
         format_optional_decimal(point.best_call_ask, 3),

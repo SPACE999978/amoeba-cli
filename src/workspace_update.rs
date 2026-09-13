@@ -15,7 +15,10 @@ const DIVERGED_BRANCH_BLOCKED_REASON: &str =
     "local branch and origin/HEAD have diverged; merge or rebase manually";
 const UPDATE_COMMIT_ENV: &str = "PETRI_TRUSTED_UPDATE_COMMIT";
 const UPDATE_PROVENANCE_BLOCKED_REASON: &str = "remote update commit is not explicitly trusted; verify origin/HEAD and set PETRI_TRUSTED_UPDATE_COMMIT to its exact commit";
-const CANONICAL_ORIGIN_URLS: [&str; 3] = [
+const CANONICAL_ORIGIN_URLS: [&str; 6] = [
+    "https://github.com/amoeba-farm/petri.git",
+    "git@github.com:amoeba-farm/petri.git",
+    "ssh://git@github.com/amoeba-farm/petri.git",
     "https://github.com/SPACE999978/ameba_cli.git",
     "git@github.com:SPACE999978/ameba_cli.git",
     "ssh://git@github.com/SPACE999978/ameba_cli.git",

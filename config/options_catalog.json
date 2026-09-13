@@ -485,5 +485,11 @@
       },
       "expiries": []
     }
-  ]
+  ],
+  "deploymentReferences": {
+    "sdkCommit": "a21b324a7a64da87046c7650355b80ea20c47540",
+    "artifactSourceCommit": "b1931fecff5229da232f06e9c5c43b1d6328806d",
+    "nativeSourceCommit": "397bd8403c7803574597a7ff3650a303b92f96c0",
+    "programDataAccountSha256": "df5e426d74dadcca84c42e999489ad3089421fe99c4ad5fc718e4b18eee5e610"
+  }
 }

@@ -12,6 +12,15 @@ use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
+pub(crate) fn current_backend_payload(payload: Value) -> Result<Value, CliError> {
+    crate::chain_identity::validate_current_backend_envelope(&payload)?;
+    Ok(payload)
+}
+
+pub(crate) fn unwrap_data<'a>(payload: &'a Value) -> &'a Value {
+    value_at_key(payload, &["data"]).unwrap_or(payload)
+}
+
 const REQUEST_TIMEOUT_SECONDS: u64 = 15;
 const GET_ATTEMPTS: usize = 3;
 const GET_RETRY_BASE_DELAY_MS: u64 = 100;
@@ -28,6 +37,11 @@ pub(crate) const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 pub struct CliError {
     message: String,
     current_state_wait: bool,
+    code: String,
+    category: String,
+    retryable: bool,
+    operation_id: Option<String>,
+    signature: Option<String>,
 }
 
 impl CliError {
@@ -35,6 +49,11 @@ impl CliError {
         Self {
             message: message.into(),
             current_state_wait: false,
+            code: "PETRI_VALIDATION_FAILED".into(),
+            category: "validation".into(),
+            retryable: false,
+            operation_id: None,
+            signature: None,
         }
     }
 
@@ -42,11 +61,77 @@ impl CliError {
         Self {
             message: message.into(),
             current_state_wait: true,
+            code: "CURRENT_STATE_UNAVAILABLE".into(),
+            category: "unavailable".into(),
+            retryable: true,
+            operation_id: None,
+            signature: None,
         }
     }
 
     pub fn is_current_state_wait(&self) -> bool {
         self.current_state_wait
+    }
+
+    pub fn coded(
+        code: impl Into<String>,
+        category: &str,
+        message: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            category: category.into(),
+            message: message.into(),
+            retryable,
+            current_state_wait: false,
+            operation_id: None,
+            signature: None,
+        }
+    }
+    pub fn uncertain(message: impl Into<String>, operation_id: &str, signature: &str) -> Self {
+        Self {
+            code: "OPERATION_TRANSPORT_UNCERTAIN".into(),
+            category: "pending".into(),
+            message: message.into(),
+            retryable: false,
+            current_state_wait: true,
+            operation_id: Some(operation_id.into()),
+            signature: Some(signature.into()),
+        }
+    }
+    pub fn confirmed_failure(
+        message: impl Into<String>,
+        operation_id: &str,
+        signature: &str,
+    ) -> Self {
+        Self {
+            code: "OPERATION_FAILED_ON_CHAIN".into(),
+            category: "execution_failed".into(),
+            message: message.into(),
+            retryable: false,
+            current_state_wait: false,
+            operation_id: Some(operation_id.into()),
+            signature: Some(signature.into()),
+        }
+    }
+    pub fn json(&self) -> Value {
+        serde_json::json!({"ok":false,"error":{"code":self.code,"category":self.category,
+            "message":terminal_safe_text(&self.message),"retryable":self.retryable,"operationId":self.operation_id,
+            "signature":self.signature,"nextStep":if self.operation_id.is_some(){"Recover this operation; never automatically resubmit."}else{"Correct the input or refresh the affected state."}}})
+    }
+    pub fn exit_code(&self) -> i32 {
+        if self.current_state_wait || self.category == "pending" {
+            75
+        } else if self.category == "denied" {
+            77
+        } else if self.category == "unavailable" {
+            69
+        } else if self.category == "execution_failed" {
+            70
+        } else {
+            1
+        }
     }
 }
 
@@ -90,12 +175,11 @@ impl BackendClient {
                         thread::sleep(get_retry_delay(attempt));
                         continue;
                     }
-                    return decode_response(response, path).map_err(|error| {
+                    return decode_response(response, path).map_err(|mut error| {
                         if attempt > 1 {
-                            CliError::new(format!("{error} after {attempt} attempts"))
-                        } else {
-                            error
+                            error.message = format!("{} after {attempt} attempts", error.message);
                         }
+                        error
                     });
                 }
                 Err(error) => {
@@ -109,9 +193,12 @@ impl BackendClient {
                     } else {
                         String::new()
                     };
-                    return Err(CliError::new(format!(
-                        "GET {path} failed{attempts}: {error}"
-                    )));
+                    return Err(CliError::coded(
+                        "BACKEND_UNAVAILABLE",
+                        "unavailable",
+                        format!("GET {path} failed{attempts}: {error}"),
+                        retryable,
+                    ));
                 }
             }
         }
@@ -347,7 +434,28 @@ fn decode_response_parts(status: StatusCode, parsed: Value, path: &str) -> Resul
                     .map(str::to_string)
             })
             .unwrap_or_else(|| format!("backend returned HTTP {status}"));
-        return Err(CliError::new(format!("{message} ({path})")));
+        let code = parsed
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|c| {
+                c.len() <= 96
+                    && c.bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            })
+            .unwrap_or("AMOEBA_REQUEST_FAILED");
+        let category = if status.is_server_error() {
+            "unavailable"
+        } else if matches!(status.as_u16(), 401 | 403 | 409) {
+            "denied"
+        } else {
+            "validation"
+        };
+        return Err(CliError::coded(
+            code,
+            category,
+            format!("{message} ({path})"),
+            status.is_server_error(),
+        ));
     }
 
     Ok(parsed)

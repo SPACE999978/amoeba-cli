@@ -120,61 +120,76 @@ pub(in super::super) fn centered_text(text: &str, width: usize) -> String {
     format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
 }
 
+// Fill, active fill, top edge, active top edge, shadow. Unknown colors
+// retain their exact value in every role; no-color styling bypasses this table.
+fn button_palette(color: Color) -> [Color; 5] {
+    let rgb = match color {
+        Color::Rgb(126, 78, 38) => [
+            (111, 67, 31),
+            (147, 88, 41),
+            (164, 99, 48),
+            (196, 128, 68),
+            (67, 39, 22),
+        ],
+        Color::Red | Color::LightRed => [
+            (160, 28, 34),
+            (192, 37, 44),
+            (203, 42, 49),
+            (238, 61, 68),
+            (92, 18, 25),
+        ],
+        Color::Green | Color::LightGreen => [
+            (26, 113, 61),
+            (33, 139, 75),
+            (42, 159, 84),
+            (62, 204, 109),
+            (13, 71, 40),
+        ],
+        Color::Yellow | Color::LightYellow => [
+            (172, 132, 18),
+            (207, 160, 26),
+            (212, 169, 33),
+            (245, 204, 60),
+            (111, 83, 13),
+        ],
+        Color::Blue | Color::LightBlue => [
+            (41, 74, 184),
+            (55, 96, 220),
+            (59, 102, 223),
+            (88, 133, 255),
+            (19, 42, 112),
+        ],
+        Color::Magenta | Color::LightMagenta => [
+            (114, 54, 176),
+            (140, 69, 214),
+            (145, 72, 219),
+            (177, 99, 255),
+            (66, 31, 111),
+        ],
+        Color::Cyan | Color::LightCyan => [
+            (0, 120, 148),
+            (0, 149, 181),
+            (0, 164, 191),
+            (43, 213, 232),
+            (0, 73, 94),
+        ],
+        other => return [other; 5],
+    };
+    rgb.map(|(r, g, b)| Color::Rgb(r, g, b))
+}
+
 pub(in super::super) fn button_fill_color(color: Color) -> Color {
-    match color {
-        Color::Rgb(126, 78, 38) => Color::Rgb(111, 67, 31),
-        Color::Red | Color::LightRed => Color::Rgb(160, 28, 34),
-        Color::Green | Color::LightGreen => Color::Rgb(26, 113, 61),
-        Color::Yellow | Color::LightYellow => Color::Rgb(172, 132, 18),
-        Color::Blue | Color::LightBlue => Color::Rgb(41, 74, 184),
-        Color::Magenta | Color::LightMagenta => Color::Rgb(114, 54, 176),
-        Color::Cyan | Color::LightCyan => Color::Rgb(0, 120, 148),
-        other => other,
-    }
+    button_palette(color)[0]
 }
 
 pub(in super::super) fn button_active_color(color: Color) -> Color {
-    match color {
-        Color::Rgb(126, 78, 38) => Color::Rgb(147, 88, 41),
-        Color::Red | Color::LightRed => Color::Rgb(192, 37, 44),
-        Color::Green | Color::LightGreen => Color::Rgb(33, 139, 75),
-        Color::Yellow | Color::LightYellow => Color::Rgb(207, 160, 26),
-        Color::Blue | Color::LightBlue => Color::Rgb(55, 96, 220),
-        Color::Magenta | Color::LightMagenta => Color::Rgb(140, 69, 214),
-        Color::Cyan | Color::LightCyan => Color::Rgb(0, 149, 181),
-        other => other,
-    }
+    button_palette(color)[1]
 }
 
 pub(in super::super) fn button_top_edge_color(color: Color, active: bool) -> Color {
-    match color {
-        Color::Rgb(126, 78, 38) if active => Color::Rgb(196, 128, 68),
-        Color::Rgb(126, 78, 38) => Color::Rgb(164, 99, 48),
-        Color::Red | Color::LightRed if active => Color::Rgb(238, 61, 68),
-        Color::Red | Color::LightRed => Color::Rgb(203, 42, 49),
-        Color::Green | Color::LightGreen if active => Color::Rgb(62, 204, 109),
-        Color::Green | Color::LightGreen => Color::Rgb(42, 159, 84),
-        Color::Yellow | Color::LightYellow if active => Color::Rgb(245, 204, 60),
-        Color::Yellow | Color::LightYellow => Color::Rgb(212, 169, 33),
-        Color::Blue | Color::LightBlue if active => Color::Rgb(88, 133, 255),
-        Color::Blue | Color::LightBlue => Color::Rgb(59, 102, 223),
-        Color::Magenta | Color::LightMagenta if active => Color::Rgb(177, 99, 255),
-        Color::Magenta | Color::LightMagenta => Color::Rgb(145, 72, 219),
-        Color::Cyan | Color::LightCyan if active => Color::Rgb(43, 213, 232),
-        Color::Cyan | Color::LightCyan => Color::Rgb(0, 164, 191),
-        other => other,
-    }
+    button_palette(color)[if active { 3 } else { 2 }]
 }
 
 pub(in super::super) fn button_shadow_color(color: Color) -> Color {
-    match color {
-        Color::Rgb(126, 78, 38) => Color::Rgb(67, 39, 22),
-        Color::Red | Color::LightRed => Color::Rgb(92, 18, 25),
-        Color::Green | Color::LightGreen => Color::Rgb(13, 71, 40),
-        Color::Yellow | Color::LightYellow => Color::Rgb(111, 83, 13),
-        Color::Blue | Color::LightBlue => Color::Rgb(19, 42, 112),
-        Color::Magenta | Color::LightMagenta => Color::Rgb(66, 31, 111),
-        Color::Cyan | Color::LightCyan => Color::Rgb(0, 73, 94),
-        other => other,
-    }
+    button_palette(color)[4]
 }

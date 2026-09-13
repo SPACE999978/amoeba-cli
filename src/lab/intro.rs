@@ -15,8 +15,43 @@ pub(super) const STARTUP_INTRO_TERMINAL_FRAME_CELLS: usize =
     STARTUP_INTRO_SOURCE_VIEW_COLS * STARTUP_INTRO_SOURCE_VIEW_ROWS;
 pub(super) const STARTUP_INTRO_TERMINAL_BRIGHT_MASK: u8 = 0x80;
 pub(super) const STARTUP_INTRO_TERMINAL_SYMBOL_MASK: u8 = 0x0f;
-pub(super) static STARTUP_INTRO_TERMINAL_FRAMES: &[u8] =
-    include_bytes!("../../assets/tui/intro/terminal-frames.bin");
+pub(super) static STARTUP_INTRO_TERMINAL_FRAMES: std::sync::LazyLock<Box<[u8]>> =
+    std::sync::LazyLock::new(|| {
+        let bytes = decode_intro_asset(
+            include_bytes!("../../assets/tui/intro/terminal-frames.bin.zlib"),
+            STARTUP_INTRO_TERMINAL_FRAME_CELLS * STARTUP_INTRO_FRAME_COUNT,
+            "2feff30af371f34989edfb7a18114840bf498d42a43cc8beca66a8c0058b472f",
+        )
+        .expect("embedded terminal animation must match its authored bytes");
+        assert!(bytes.iter().all(|code| code & 0x7f <= 6));
+        bytes
+    });
+
+// One zlib stream, exact expanded length, no trailing bytes. Decode once before
+// the playback clock starts; rendering continues to consume ordinary cell bytes.
+fn decode_intro_asset(
+    packed: &[u8],
+    expected_bytes: usize,
+    expected_sha256: &str,
+) -> Result<Box<[u8]>, &'static str> {
+    let mut decoder = flate2::Decompress::new(true);
+    let mut bytes = vec![0; expected_bytes + 1];
+    let status = decoder
+        .decompress(packed, &mut bytes, flate2::FlushDecompress::Finish)
+        .map_err(|_| "invalid intro compression")?;
+    if status != flate2::Status::StreamEnd
+        || decoder.total_out() != expected_bytes as u64
+        || decoder.total_in() != packed.len() as u64
+    {
+        return Err("invalid intro length or trailing data");
+    }
+    bytes.truncate(expected_bytes);
+    let digest = crate::content_hash::sha256_hex(&bytes);
+    if digest != expected_sha256 {
+        return Err("intro content digest mismatch");
+    }
+    Ok(bytes.into_boxed_slice())
+}
 static STARTUP_INTRO_TERMINAL_MOTION_MASK: std::sync::OnceLock<Box<[bool]>> =
     std::sync::OnceLock::new();
 static STARTUP_INTRO_TERMINAL_BRIGHT_TONE_MASK: std::sync::OnceLock<Box<[bool]>> =

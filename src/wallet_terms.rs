@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::CliError;
 
 pub(crate) const TERMS_VERSION: &str = "amoeba-wallet-terms-v1";
-pub(crate) const DEFAULT_TERMS_URL: &str = "https://oauth.amoeba.farm/terms";
+pub(crate) const DEFAULT_TERMS_URL: &str = "https://amoeba.farm/terms";
 
 #[derive(Clone, Debug)]
 pub(crate) struct WalletTermsStatus {

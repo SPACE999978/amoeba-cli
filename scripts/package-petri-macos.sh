@@ -47,6 +47,9 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
+  node "$SCRIPT_DIR/build-sdk-runtime.mjs"
+  export PETRI_REQUIRE_SDK_RUNTIME=1
+  export CARGO_PROFILE_RELEASE_LTO=false
   RUSTFLAG_SEPARATOR=$'\x1f'
   for remap_flag in "--remap-path-prefix=$REPO_ROOT=." "--remap-path-prefix=$HOME=<home>"; do
     if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
@@ -60,6 +63,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
 fi
 
 BINARY="$REPO_ROOT/target/release/petri"
+node "$SCRIPT_DIR/build-sdk-runtime.mjs" --verify
 ICON="$REPO_ROOT/assets/Petri.icns"
 LICENSE_PATH="$REPO_ROOT/LICENSE"
 THIRD_PARTY_NOTICES_PATH="$REPO_ROOT/THIRD_PARTY_NOTICES.md"

@@ -9,15 +9,14 @@ pub(in super::super) fn draw_terms_screen(
     app: &LabApp,
 ) {
     let focused = app.focus == LabFocus::Terms;
-    let panel = Paragraph::new(scroll_lines_to_panel(
+    let panel = scrolling_panel(
         wallet_terms_lines(cli, app),
         area,
         cli,
         app.focused_panel_scroll(LabFocus::Terms),
         focused,
-    ))
-    .block(panel_block(cli, "wallet terms", Color::Yellow, focused))
-    .wrap(Wrap { trim: true });
+    )
+    .block(panel_block(cli, "wallet terms", Color::Yellow, focused));
     frame.render_widget(panel, area);
 }
 

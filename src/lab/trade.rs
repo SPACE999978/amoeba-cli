@@ -9,19 +9,19 @@ impl LabApp {
     }
 
     pub(super) fn select_trade_action(&mut self, action: TradeAction) {
-        if self.trade_submit_is_running() {
+        if self.trading.submit_is_running() {
             self.status =
                 "A transaction is still submitting. Wait for its result before opening another ticket."
                     .to_string();
             return;
         }
         let already_on_chain = self.screen == LabScreen::Chain;
-        self.trade_action = action;
+        self.trading.action = action;
         if !already_on_chain {
             self.open_chain();
         }
         self.begin_trade_ticket(action);
-        if self.trade_ticket.is_none() && self.selected_quote().is_none() {
+        if self.trading.ticket.is_none() && self.selected_quote().is_none() {
             self.status = format!(
                 "Select a contract, then press {} to {}.",
                 match action {
@@ -34,15 +34,15 @@ impl LabApp {
     }
 
     pub(super) fn begin_trade_ticket(&mut self, action: TradeAction) {
-        if self.trade_submit_is_running() {
+        if self.trading.submit_is_running() {
             self.status =
                 "An order is still submitting. Wait for its result before changing the ticket."
                     .to_string();
             return;
         }
         if let Err(error) = self.require_selected_contract_tradeable() {
-            self.trade_ticket = None;
-            self.trade_ticket_field_flash = None;
+            self.trading.ticket = None;
+            self.trading.ticket_field_flash = None;
             self.status = error;
             return;
         }
@@ -50,45 +50,39 @@ impl LabApp {
             .selected_quote()
             .and_then(|quote| trade_route_price(quote, action));
         if self.selected_quote().is_none() {
-            self.trade_ticket = None;
-            self.trade_ticket_field_flash = None;
+            self.trading.ticket = None;
+            self.trading.ticket_field_flash = None;
             return;
         }
-        self.trade_action = action;
-        self.trade_ticket = Some(TradeTicket::new(action, premium));
-        self.trade_ticket_field_flash = None;
+        self.trading.action = action;
+        self.trading.ticket = Some(TradeTicket::new(action, premium));
+        self.trading.ticket_field_flash = None;
         self.status = match action {
             TradeAction::Buy => {
                 "Buy ticket opened. Price and contracts determine max loss.".to_string()
             }
             TradeAction::Sell => {
-                "Sell ticket opened. Premium and contracts determine max loss.".to_string()
+                "Sell owned options. Enter contracts and minimum sale price; this does not open a short.".to_string()
             }
         };
     }
 
     pub(super) fn require_selected_contract_tradeable(&self) -> Result<(), String> {
         let detail = self
+            .trading
             .detail
             .as_ref()
             .ok_or_else(|| "Load a market before opening an order ticket.".to_string())?;
         let expiry = self
             .selected_chart_expiry()
             .ok_or_else(|| "Select a contract month before opening an order ticket.".to_string())?;
-        if self.loading_oracle_live {
-            return Err(format!(
-                "Order unavailable: checking the authoritative on-chain lifecycle for {} {}.",
-                detail.symbol, expiry.label
-            ));
-        }
         let phase = self.oracle_phase();
-        if phase == OraclePhase::Unavailable {
-            return Err(format!(
-                "Order unavailable: Petri could not verify the authoritative on-chain lifecycle for {} {}. No ticket was created.",
-                detail.symbol, expiry.label
-            ));
-        }
-        if phase != OraclePhase::GameMode {
+        // Opening an editable ticket grants no authority. An independently loading
+        // Oracle panel must not block exact-series SDK/Lean preparation.
+        if !self.oracle.loading_live
+            && phase != OraclePhase::Unavailable
+            && phase != OraclePhase::GameMode
+        {
             return Err(format!(
                 "Order unavailable: {} {} is in {}, not Game Mode. Contracts cannot be listed or traded before Game Mode.",
                 detail.symbol,
@@ -109,45 +103,27 @@ impl LabApp {
     }
 
     pub(super) fn cancel_trade_ticket(&mut self) {
-        if self.trade_submit_is_running() {
+        if self.trading.submit_is_running() {
             self.status =
                 "Order submission is running. The ticket will unlock when it finishes.".to_string();
             return;
         }
-        self.trade_ticket = None;
-        self.trade_ticket_field_flash = None;
+        self.trading.ticket = None;
+        self.trading.ticket_field_flash = None;
         self.status = "Order ticket closed.".to_string();
     }
 
-    pub(super) fn move_trade_ticket_field(&mut self, direction: isize) {
-        if self.trade_submit_is_running() {
-            return;
-        }
-        let Some(ticket) = self.trade_ticket.as_mut() else {
-            return;
-        };
-        if direction == 0 {
-            return;
-        }
-        ticket.field = match ticket.field {
-            TradeTicketField::Premium => TradeTicketField::Quantity,
-            TradeTicketField::Quantity => TradeTicketField::Premium,
-        };
-        ticket.clear_review();
-        self.trade_ticket_field_flash = None;
-    }
-
     pub(super) fn select_trade_ticket_field(&mut self, field: TradeTicketField) {
-        if self.trade_submit_is_running() {
+        if self.trading.submit_is_running() {
             return;
         }
-        let Some(ticket) = self.trade_ticket.as_mut() else {
+        let Some(ticket) = self.trading.ticket.as_mut() else {
             return;
         };
         let price_label = ticket.action.price_label();
         ticket.field = field;
         ticket.clear_review();
-        self.flash_trade_ticket_field(field);
+        self.trading.flash_ticket_field(field);
         self.status = match field {
             TradeTicketField::Premium => {
                 format!(
@@ -161,82 +137,12 @@ impl LabApp {
         };
     }
 
-    pub(super) fn flash_trade_ticket_field(&mut self, field: TradeTicketField) {
-        self.trade_ticket_field_flash = Some(TradeTicketFieldFlash {
-            field,
-            ticks_remaining: TRADE_TICKET_FIELD_FLASH_TICKS,
-            visible: true,
-        });
-    }
-
-    pub(super) fn trade_ticket_field_flash_visible(&self, field: TradeTicketField) -> bool {
-        self.trade_ticket_field_flash
-            .filter(|flash| flash.field == field)
-            .map(|flash| flash.visible)
-            .unwrap_or(false)
-    }
-
-    pub(super) fn push_trade_ticket_char(&mut self, character: char) {
-        if self.trade_submit_is_running() {
-            return;
-        }
-        let Some(ticket) = self.trade_ticket.as_mut() else {
-            return;
-        };
-        if ticket.submitting {
-            return;
-        }
-        match ticket.field {
-            TradeTicketField::Premium => {
-                if character.is_ascii_digit()
-                    || (character == '.' && !ticket.premium_input.contains('.'))
-                {
-                    ticket.premium_input.push(character);
-                    ticket.clear_review();
-                    self.trade_ticket_field_flash = None;
-                }
-            }
-            TradeTicketField::Quantity => {
-                if character.is_ascii_digit() {
-                    if ticket.quantity_input == "0" {
-                        ticket.quantity_input.clear();
-                    }
-                    ticket.quantity_input.push(character);
-                    ticket.clear_review();
-                    self.trade_ticket_field_flash = None;
-                }
-            }
-        }
-    }
-
-    pub(super) fn backspace_trade_ticket_input(&mut self) {
-        if self.trade_submit_is_running() {
-            return;
-        }
-        let Some(ticket) = self.trade_ticket.as_mut() else {
-            return;
-        };
-        if ticket.submitting {
-            return;
-        }
-        match ticket.field {
-            TradeTicketField::Premium => {
-                ticket.premium_input.pop();
-            }
-            TradeTicketField::Quantity => {
-                ticket.quantity_input.pop();
-            }
-        }
-        ticket.clear_review();
-        self.trade_ticket_field_flash = None;
-    }
-
     pub(super) fn review_or_submit_trade_ticket(
         &mut self,
         cli: &Cli,
-        _fetch_tx: &Sender<LabFetchResult>,
+        fetch_tx: &Sender<LabFetchResult>,
     ) {
-        if self.trade_submit_is_running() {
+        if self.trading.submit_is_running() {
             self.status =
                 "An order is already submitting. Wait for its result before submitting again."
                     .to_string();
@@ -246,7 +152,7 @@ impl LabApp {
             Ok(submit) => submit,
             Err(error) => {
                 let field = trade_ticket_validation_field(&error);
-                if let Some(ticket) = self.trade_ticket.as_mut() {
+                if let Some(ticket) = self.trading.ticket.as_mut() {
                     ticket.confirmation = None;
                     ticket.result = Some(TradeTicketResult {
                         ok: false,
@@ -257,50 +163,38 @@ impl LabApp {
                     }
                 }
                 if let Some(field) = field {
-                    self.flash_trade_ticket_field(field);
+                    self.trading.flash_ticket_field(field);
                 }
                 self.status = error;
                 return;
             }
         };
-        let Some(ticket) = self.trade_ticket.as_mut() else {
+        let Some(ticket) = self.trading.ticket.as_mut() else {
             return;
         };
         ticket.last_command = Some(submit.command.clone());
         ticket.confirmation = None;
-        ticket.result = Some(TradeTicketResult {
-            ok: true,
-            message: format!(
-                "The Lab ticket is review-only. This card lacks the exact on-chain address and atom limits required by the collective route. Expert preparation template: {}",
-                submit.command
-            ),
-        });
-        self.status = format!(
-            "The Lab ticket is review-only for the current release; no transaction was prepared or submitted. Nothing was prepared, signed, or sent. [{}]",
-            crate::current_release::WRITE_ERROR_CODE
+        ticket.result = None;
+        ticket.submitting = true;
+        self.trading.submit_request = self.trading.submit_request.wrapping_add(1);
+        let request_id = self.trading.submit_request;
+        ticket.submit_request_id = Some(request_id);
+        self.trading.submit_inflight = Some(request_id);
+        self.status =
+            "Preparing exact trade and checking current permission. Nothing is signed yet.".into();
+        spawn_trade_prepare(
+            submit,
+            fetch_tx.clone(),
+            request_id,
+            self.wallet.pubkey.clone().unwrap_or_default(),
+            self.selected_chart_expiry()
+                .map(|e| e.id.clone())
+                .unwrap_or_default(),
         );
     }
 
-    pub(super) fn move_trade_confirmation_choice(&mut self, direction: isize) {
-        if direction == 0 {
-            return;
-        }
-        let Some(confirmation) = self
-            .trade_ticket
-            .as_mut()
-            .and_then(|ticket| ticket.confirmation.as_mut())
-        else {
-            return;
-        };
-        confirmation.choice = if direction < 0 {
-            TradeConfirmationChoice::Cancel
-        } else {
-            TradeConfirmationChoice::Confirm
-        };
-    }
-
     pub(super) fn cancel_trade_confirmation(&mut self) {
-        let Some(ticket) = self.trade_ticket.as_mut() else {
+        let Some(ticket) = self.trading.ticket.as_mut() else {
             return;
         };
         ticket.confirmation = None;
@@ -313,7 +207,8 @@ impl LabApp {
         fetch_tx: &Sender<LabFetchResult>,
     ) {
         let choice = self
-            .trade_ticket
+            .trading
+            .ticket
             .as_ref()
             .and_then(|ticket| ticket.confirmation.as_ref())
             .map(|confirmation| confirmation.choice);
@@ -363,14 +258,14 @@ impl LabApp {
     pub(super) fn begin_confirmed_trade_submit(&mut self) -> Result<TradeSubmitLaunch, String> {
         crate::current_release::require_current_write_release()
             .map_err(|error| error.to_string())?;
-        if self.trade_submit_is_running() {
+        if self.trading.submit_is_running() {
             return Err(
                 "An order is already submitting. Wait for its result before submitting again."
                     .to_string(),
             );
         }
         self.require_selected_contract_tradeable()?;
-        let Some(ticket) = self.trade_ticket.as_mut() else {
+        let Some(ticket) = self.trading.ticket.as_mut() else {
             return Err("Open an order ticket before submitting.".to_string());
         };
         let confirmation = ticket
@@ -381,9 +276,9 @@ impl LabApp {
         let action = submit.summary.action;
         ticket.submitting = true;
         ticket.last_command = Some(submit.command.clone());
-        self.trade_submit_request = self.trade_submit_request.wrapping_add(1);
-        let request_id = self.trade_submit_request;
-        self.trade_submit_inflight = Some(request_id);
+        self.trading.submit_request = self.trading.submit_request.wrapping_add(1);
+        let request_id = self.trading.submit_request;
+        self.trading.submit_inflight = Some(request_id);
         ticket.submit_request_id = Some(request_id);
         self.status = format!(
             "Submitting {} order...",

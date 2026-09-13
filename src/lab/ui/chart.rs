@@ -77,7 +77,7 @@ fn draw_chart_controls(frame: &mut Frame<'_>, cli: &Cli, area: Rect, app: &LabAp
                 cli,
                 range.label(),
                 Color::Cyan,
-                app.chart_range == range,
+                app.trading.chart_range == range,
                 rects[index].width,
                 rects[index].height,
             )),
@@ -88,13 +88,13 @@ fn draw_chart_controls(frame: &mut Frame<'_>, cli: &Cli, area: Rect, app: &LabAp
     frame.render_widget(
         Paragraph::new(raised_button_lines(
             cli,
-            if app.loading_chart {
+            if app.trading.loading_chart {
                 "Loading"
             } else {
                 "Refresh"
             },
             Color::Yellow,
-            app.loading_chart,
+            app.trading.loading_chart,
             refresh.width,
             refresh.height,
         )),
@@ -110,7 +110,7 @@ pub(in super::super) fn draw_chart_screen(
 ) {
     draw_chart_controls(frame, cli, area, app);
     let area = chart_content_area(area);
-    if let Some(chart) = &app.chart {
+    if let Some(chart) = &app.trading.chart {
         if area.height >= 12 {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
@@ -133,12 +133,12 @@ pub(in super::super) fn draw_chart_screen(
             )
         })
         .unwrap_or_else(|| "No month selected.".to_string());
-    let title = if app.loading_chart {
+    let title = if app.trading.loading_chart {
         format!("{} Loading chart...", app.spinner())
     } else {
         "Chart is not available right now.".to_string()
     };
-    let panel = Paragraph::new(scroll_lines_to_panel(
+    let panel = scrolling_panel(
         vec![
             Line::from(Span::styled(
                 title,
@@ -158,14 +158,13 @@ pub(in super::super) fn draw_chart_screen(
         cli,
         app.focused_panel_scroll(LabFocus::Chart),
         app.focus == LabFocus::Chart,
-    ))
+    )
     .block(panel_block(
         cli,
         "month chart",
         Color::Cyan,
         app.focus == LabFocus::Chart,
-    ))
-    .wrap(Wrap { trim: true });
+    ));
     frame.render_widget(panel, area);
 }
 
@@ -175,15 +174,14 @@ pub(in super::super) fn draw_contract_activity_button(
     area: Rect,
     app: &LabApp,
 ) {
-    let panel = Paragraph::new(scroll_lines_to_panel(
+    let panel = scrolling_panel(
         vec![contract_activity_hint_line(cli, app)],
         area,
         cli,
         app.focused_panel_scroll(LabFocus::Activity),
         false,
-    ))
-    .block(panel_block(cli, "contract activity", Color::Blue, false))
-    .wrap(Wrap { trim: true });
+    )
+    .block(panel_block(cli, "contract activity", Color::Blue, false));
     frame.render_widget(panel, area);
 }
 

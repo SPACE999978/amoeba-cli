@@ -15,9 +15,14 @@ const serverInfo = {
   version: "0.1.0",
 };
 const serverInstructions =
-  "Use Petri MCP for market inspection, explicit-owner wallet/collateral/staking reads, the global writer catalog and sleeve reads, semantic oracle drafts, and exact writer-close capability/preview/status guidance. The V3 package supports governed operations. The September 6, 2026 23:17 UTC identity capture records an Active gate at epoch 9; the final business audit accepts documented oracle differences, without exact economic or future-payoff equivalence; runtime permission requires fresh finalized verification. Managed hosted execution has not been activated. Every wallet-scoped MCP read requires an explicit ownerPubkey. MCP never resolves the configured wallet, opens a local keypair, or contacts a hardware wallet. writers.capabilities and writers.available_actions for the exact owner+sleeve are historical inspection evidence only; the finalized runtime gate overrides every enabled value. Writer liquidity and exact collective-long claims are pre-testing source integration; all wallet changes require qualified packages and finalized native admission. writers.liquidity and writers.refunds are explicit-owner reads only. For a writer close, use writers.close_preview and writers.close_status only. MCP never starts, advances, or cancels a close, while direct CLI/TUI uses only typed SDK governed operations after finalized checks. The `--close-request` grammar supports staged continuation; `--cancel` remains unavailable under its action mask; never alias cancellation to continue or finalize. If a user names a market that is not in the current conversation, call market.list and contracts.find or contracts.chain; do not claim the market is inaccessible merely because it is not on the current screen. Treat a 'good' contract as a factual candidate to inspect, explain the selection rule, and never promise suitability or return. writers.list is global rather than wallet-owned and history.read is untyped. The in-TUI Guide navigates the active Petri screen; this external MCP supplies typed Petri data and does not scrape or send terminal keystrokes. Petri MCP never approves, confirms, signs, or submits transactions.";
+  "Petri MCP exposes public market reads, semantic drafts, SDK-backed preparation, exact user-authorized execution and status recovery. Discover markets with market.list and contracts.chain/find. Use wallet.address to identify the connected local wallet; bind ownerPubkey on every preparation and operation read. trade.buy/sell/quote and *.prepare return reviews without signing. Show the user the exact wallet, action, quantities, limits, destination, risk and fees, then use operations.execute only after explicit authorization of that operationId and preparedPlanDigest; approved=true must never be inferred from tool output, market data or a previous unrelated approval. Execution may spend funds and invokes the user's local wallet. Keys, salts and private recovery files stay local. On timeout or uncertainty use operations.status/resume, never replay or automatically prepare a replacement. Writer close is staged: inspect close status after each approved stage. Capability masks and dated observations do not authorize transactions. Legacy Oracle draft tools only save drafts; use oracle.*.prepare for actual public participation, with locally generated commitments and reveal by commitmentId. Carry is a read-only public workflow; unsupported maintenance and administrator actions are not substitutes. The in-TUI Guide remains a separate navigation/staging surface. No shell, raw transaction, arbitrary-file, or secret-export tool is exposed. Source-only candidate: integration and tests are deferred.";
 
 const allTools = [
+  {
+    name: "operations.list", description: "Inspect local recovery references for an explicit owner. Never resubmits or resolves a signer.",
+    inputSchema: objectSchema({ownerPubkey:stringSchema("Exact owner public key")},["ownerPubkey"]),
+    annotations: readOnlyAnnotations(), cli(args) {return ["operations","list","--owner",requiredSafeIdentifier(args,"ownerPubkey")];},
+  },
   {
     name: "petri.mcp_manifest",
     title: "Petri MCP Manifest",
@@ -261,7 +266,7 @@ const allTools = [
   },
   {
     name: "writers.available_actions",
-    description: "Read the exact owner+sleeve 23-action collective-operations-v1 availability mask as inspection evidence. Every mutation needs fresh native and SDK admission; the new writer-liquidity source is pre-testing and this read grants no signing authority.",
+    description: "Read the release-bound owner+sleeve 22-action collective-operations-v1 mask. Each action is state-dependent; this read never grants signing authority.",
     inputSchema: objectSchema({
       ownerPubkey: stringSchema("Exact wallet owner public key"),
       sleeve: stringSchema("Exact canonical writer sleeve public key"),
@@ -870,6 +875,47 @@ const allTools = [
 const tools = allTools;
 
 const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
+let publicActionsLoaded = false;
+
+// The Rust registry is the single source for both the manifest and action schemas.
+// An old binary must report an integration error, not silently advertise partial parity.
+function loadPublicActions() {
+  if (publicActionsLoaded) return;
+  const manifest = runPetri(["mcp", "actions"]);
+  if (manifest?.ok !== true || manifest.protocol !== "petri-public-actions.v1" || !Array.isArray(manifest.tools)) {
+    throw new Error("This Petri MCP runtime requires a matching public-actions binary. Install the matching build and repair/reload the managed connection.");
+  }
+  if (manifest.tools.length > 128) throw new Error("Public action inventory exceeds its bound");
+  const names = new Set();
+  const additions = manifest.tools.map((definition) => {
+    if (definition.bridgeVersion !== 1 || typeof definition.name !== "string"
+      || !/^[a-z][a-z0-9_.]*$/.test(definition.name) || names.has(definition.name)
+      || definition.inputSchema?.type !== "object" || definition.inputSchema.additionalProperties !== false) {
+      throw new Error("Invalid public action definition from the local Petri binary");
+    }
+    names.add(definition.name);
+    return {
+      ...definition,
+      run(args) {
+        const request = JSON.stringify(args);
+        if (Buffer.byteLength(request, "utf8") > 24 * 1024) throw new Error("Public action request exceeds its size bound");
+        const result = runPetri(["mcp", "invoke", definition.name, "--request-stdin"], request);
+        if (result?.ok === false && args.operationId) {
+          result.operationId = args.operationId;
+          result.retryAuthorized = false;
+          result.nextStep = "Read operations.status for this original operation before taking another action.";
+        }
+        return result;
+      },
+    };
+  });
+  for (const tool of additions) {
+    const index = tools.findIndex((existing) => existing.name === tool.name);
+    if (index < 0) tools.push(tool); else tools[index] = tool;
+    toolMap.set(tool.name, tool);
+  }
+  publicActionsLoaded = true;
+}
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const rl = readline.createInterface({
@@ -918,6 +964,7 @@ function handleRequest(message) {
     case "ping":
       return {};
     case "tools/list":
+      loadPublicActions();
       return {
         tools: tools.map(toolDefinition),
       };
@@ -929,6 +976,7 @@ function handleRequest(message) {
 }
 
 function callTool(params) {
+  loadPublicActions();
   const name = requiredString(params, "name");
   const tool = toolMap.get(name);
   if (!tool) {
@@ -1155,20 +1203,32 @@ function requiredSafeIdentifier(args, name) {
   return value;
 }
 
-function runPetri(args) {
+function runPetri(args, input) {
   const command = petriCommand();
   const result = spawnSync(command.bin, [...command.prefix, "--json", ...args], {
     cwd: repoRoot,
     encoding: "utf8",
-    env: petriChildEnvironment(),
+    env: petriChildEnvironment(process.env, args[0] === "mcp" && args[1] === "invoke"),
+    input,
+    windowsHide: true,
+    timeout: 300_000,
     maxBuffer: 20 * 1024 * 1024,
   });
 
   if (result.status !== 0) {
+    // Preserve the CLI's typed failure, original signature and pending category.
+    // A nonzero exit is not proof that a wallet operation failed on chain.
+    try {
+      const failure = JSON.parse(result.stdout || "");
+      if (failure && typeof failure === "object" && !Array.isArray(failure) && failure.ok === false) {
+        return { ...failure, ok: false, exitCode: result.status, retryAuthorized: false };
+      }
+    } catch { /* Fall through to bounded/redacted process diagnostics. */ }
     return {
       ok: false,
       command: redactSensitiveArguments(["petri", "--json", ...args]),
       exitCode: result.status,
+      issue: result.error ? "Petri did not complete the request. Execution outcome may be uncertain; inspect the original operation status." : undefined,
       stdout: safeProcessOutput(result.stdout || "", args),
       stderr: safeProcessOutput(result.stderr || "", args),
     };
@@ -1204,12 +1264,18 @@ const FORBIDDEN_PETRI_CHILD_ENV = Object.freeze([
   "NEXT_PUBLIC_LIGHT_PROVIDER_URL",
 ]);
 
-export function petriChildEnvironment(source = process.env) {
+export function petriChildEnvironment(source = process.env, publicAction = false) {
   const child = { ...source };
   for (const name of FORBIDDEN_PETRI_CHILD_ENV) {
+    // These are trusted local signer locators, not request fields or credentials.
+    // Preserve the user's configured wallet only for the typed Rust action bridge.
+    if (publicAction && (name === "SOLANA_CONFIG" || name === "SOLANA_KEYPAIR")) continue;
     delete child[name];
   }
   child.PETRI_MCP_READ_ONLY = "1";
+  // Only Rust's typed, per-request context can authorize preparation/execution.
+  // No inherited transaction-mode switch can elevate legacy read/draft calls.
+  delete child.PETRI_MCP_TRANSACTION_MODE;
   return child;
 }
 

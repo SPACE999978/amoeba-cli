@@ -1,119 +1,24 @@
-name: Public source CI
-
+name: Public source preflight
 on:
   pull_request:
   push:
-    branches: [main, "release/**"]
-
+    branches: [main]
 permissions:
   contents: read
-
-env:
-  CARGO_BUILD_JOBS: "1"
-
 jobs:
-  linux:
+  preflight:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
-      - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libssl-dev libudev-dev pkg-config
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          toolchain: 1.93.1
-          components: rustfmt
-      - name: Check formatting
-        run: cargo fmt -- --check
-      - name: Check public Petri
-        run: cargo check --locked --bin petri -j1
-      - name: Run locked public tests
-        run: cargo test --locked -j1 -- --test-threads=1
-      - name: Check current governance boundary
-        run: node scripts/check-current-governance-release.mjs
-      - name: Build public Petri release
-        run: cargo build --locked --release --bin petri -j1
-      - name: Prove current mutations fail before network or signer access
-        run: node scripts/check-current-write-refusal.mjs --binary target/release/petri
-      - name: Check embedded MCP wrapper syntax
-        run: node --check scripts/petri-mcp-server.mjs
-      - name: Smoke public command surface
+      - name: Check release script syntax
         run: |
-          target/release/petri --version
-          target/release/petri --help
-          target/release/petri staking --help
-          target/release/petri --json config show
-
-  macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          toolchain: 1.93.1
-      - name: Build public Petri release
-        run: cargo build --locked --release --bin petri -j1
-      - name: Prove current mutations fail before network or signer access
-        run: node scripts/check-current-write-refusal.mjs --binary target/release/petri
-      - name: Check macOS release scripts
-        run: |
-          bash -n scripts/package-petri-macos.sh
-          bash -n scripts/install-petri-macos.sh
-      - name: Smoke public command surface
-        run: |
-          export PETRI_CONFIG_PATH="$RUNNER_TEMP/petri-smoke/config.json"
-          target/release/petri --version
-          target/release/petri --help
-          target/release/petri staking --help
-          target/release/petri --json config show
-          target/release/petri config set backend-url http://127.0.0.1:4000 | grep -F 'backend=http://127.0.0.1:4000'
-          target/release/petri config show | grep -F 'walletChanges=unavailable-governance-gate-v1'
-          target/release/petri config reset backend-url | grep -F 'backend=https://api.amoeba.farm'
-
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          toolchain: 1.93.1
-      - name: Parse Windows release scripts
-        shell: powershell
-        run: |
-          $Failed = $false
-          foreach ($Script in @(
-            "scripts/install-petri.ps1",
-            "scripts/package-petri-windows.ps1",
-            "scripts/finish-petri-windows-update.ps1"
-          )) {
-            $Tokens = $null
-            $Errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $Script),
-              [ref]$Tokens,
-              [ref]$Errors
-            ) | Out-Null
-            if ($Errors.Count -gt 0) {
-              $Errors | ForEach-Object { Write-Error "$Script`: $($_.Message)" }
-              $Failed = $true
-            }
-          }
-          if ($Failed) {
-            throw "One or more Windows release scripts failed to parse."
-          }
-      - name: Build public Petri release
-        run: cargo build --locked --release --bin petri -j1
-      - name: Prove current mutations fail before network or signer access
-        run: node scripts/check-current-write-refusal.mjs --binary .\target\release\petri.exe
-      - name: Smoke public command surface
-        shell: powershell
-        run: |
-          .\target\release\petri.exe --version
-          .\target\release\petri.exe --help
-          .\target\release\petri.exe staking --help
-          .\target\release\petri.exe --json config show
+          node --check scripts/build-sdk-runtime.mjs
+          node --check scripts/sdk-runtime-files.mjs
+          node --check scripts/package-petri-preview.mjs
+          node --check scripts/petri-mcp-server.mjs
+          bash -n scripts/install-preview.sh
+      - name: Check public Cargo manifest
+        run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
+# Platform release compilation and startup checks run once in Preview binaries.

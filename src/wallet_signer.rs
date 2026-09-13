@@ -13,10 +13,9 @@ use crate::{backend::CliError, onchain::OnchainConfig, solana_config};
 
 const HARDWARE_WALLET_CONNECT_HINT: &str =
     "connect and unlock your hardware wallet, open the Solana app, close Ledger Live, then retry";
-const PETRI_MCP_READ_ONLY_ENV: &str = "PETRI_MCP_READ_ONLY";
 
 fn mcp_signer_access_blocked() -> bool {
-    std::env::var(PETRI_MCP_READ_ONLY_ENV).is_ok_and(|value| value == "1")
+    crate::mcp_actions::identity_blocked()
 }
 
 #[cfg(unix)]
@@ -271,6 +270,12 @@ pub(crate) fn require_admitted_signer(
 }
 
 pub(crate) fn signer_pubkey_from_path(path: &str) -> Result<String, CliError> {
+    let owner = read_signer_pubkey_from_path(path)?;
+    crate::mcp_actions::check_owner(&owner)?;
+    Ok(owner)
+}
+
+fn read_signer_pubkey_from_path(path: &str) -> Result<String, CliError> {
     if mcp_signer_access_blocked() {
         return Err(CliError::new(
             "wallet identity resolution is unavailable inside the Petri MCP read-only process",
@@ -308,9 +313,9 @@ pub(crate) fn signer_pubkey_from_path(path: &str) -> Result<String, CliError> {
 }
 
 pub(crate) fn load_signer(config: &OnchainConfig) -> Result<Box<dyn Signer>, CliError> {
-    if mcp_signer_access_blocked() {
+    if crate::mcp_actions::signing_blocked() {
         return Err(CliError::new(
-            "signing is unavailable inside the Petri MCP read-only process",
+            "MCP signing requires explicit authorization for one exact reviewed operation",
         ));
     }
 

@@ -22,6 +22,18 @@ pub fn dlmm_market_chart(market_id: &str, window_ms: Option<u64>) -> String {
     path
 }
 
+pub fn dlmm_expiry_chart(market_id: &str, expiry_id: &str, window_ms: Option<u64>) -> String {
+    let mut path = format!(
+        "/dlmm/markets/{}/expiries/{}/chart",
+        path_segment(market_id),
+        path_segment(expiry_id)
+    );
+    if let Some(window_ms) = window_ms {
+        path.push_str(&format!("?windowMs={window_ms}"));
+    }
+    path
+}
+
 pub fn dlmm_oracle_state() -> &'static str {
     "/dlmm/oracle/state"
 }
@@ -82,6 +94,10 @@ pub fn dlmm_trade_prepare() -> &'static str {
 
 pub fn dlmm_trade_submit() -> &'static str {
     "/dlmm/trades/submit"
+}
+
+pub fn dlmm_trade_lifetime() -> &'static str {
+    "/dlmm/trades/transaction-lifetime"
 }
 
 pub fn dlmm_trade_status(operation_id: &str) -> String {
@@ -204,6 +220,16 @@ pub fn writer_operation_status(operation_id: &str) -> String {
 
 pub fn dlmm_liquidity_prepare() -> &'static str {
     "/dlmm/liquidity/prepare"
+}
+
+pub fn position_action(position: &str) -> String {
+    format!("/dlmm/positions/{}/action", path_segment(position))
+}
+pub fn oracle_draft_prepare() -> &'static str {
+    "/dlmm/oracle/drafts/prepare"
+}
+pub fn registered_transaction_submit() -> &'static str {
+    "/chain/transactions/submit"
 }
 
 fn path_segment(value: &str) -> String {

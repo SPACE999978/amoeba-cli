@@ -42,7 +42,7 @@ pub(in super::super) fn draw_trade_action_button(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let active = app.trade_action == action;
+    let active = app.trading.action == action;
     let key = match action {
         TradeAction::Buy => "B",
         TradeAction::Sell => "S",
@@ -115,19 +115,21 @@ pub(in super::super) fn selected_contract_button_rects(area: Rect) -> Option<(Re
 }
 
 pub(in super::super) fn selected_contract_preview_command(app: &LabApp) -> String {
-    let Some(detail) = &app.detail else {
+    let Some(detail) = &app.trading.detail else {
         return "load a market to see the CLI command".to_string();
     };
     let Some(quote) = app.selected_quote() else {
         return "select a contract to see the CLI command".to_string();
     };
-    let route_price = trade_route_price(quote, app.trade_action);
-    let unavailable_label = trade_risk_unavailable_label(quote, app.trade_action);
-    match (app.trade_action, route_price) {
+    let route_price = trade_route_price(quote, app.trading.action);
+    let unavailable_label = trade_risk_unavailable_label(quote, app.trading.action);
+    match (app.trading.action, route_price) {
         (_, Some(price)) => {
-            trade_plan_command(detail, quote, app.trade_action, &format_decimal(price, 3))
+            trade_plan_command(detail, quote, app.trading.action, &format_decimal(price, 3))
         }
-        (TradeAction::Sell, None) => trade_plan_command(detail, quote, app.trade_action, "<price>"),
+        (TradeAction::Sell, None) => {
+            trade_plan_command(detail, quote, app.trading.action, "<price>")
+        }
         (TradeAction::Buy, None) => {
             format!("price quote missing: {unavailable_label}; select a quoted contract or refresh")
         }
@@ -135,7 +137,7 @@ pub(in super::super) fn selected_contract_preview_command(app: &LabApp) -> Strin
 }
 
 pub(in super::super) fn trade_panel_border_style(cli: &Cli, app: &LabApp, focused: bool) -> Style {
-    if app.trade_ticket.is_some() {
+    if app.trading.ticket.is_some() {
         let blink_on = (app.spinner_tick / 2) % 2 == 0;
         if cli.no_color {
             let mut style = Style::default().add_modifier(Modifier::BOLD);
@@ -161,20 +163,20 @@ pub(in super::super) fn draw_chain_screen(
     area: Rect,
     app: &LabApp,
 ) {
-    let Some(detail) = &app.detail else {
-        let label = if app.loading_detail {
+    let Some(detail) = &app.trading.detail else {
+        let label = if app.trading.loading_detail {
             format!(
                 "{} Loading {} market...",
                 app.spinner(),
                 app.selected_id().to_uppercase()
             )
-        } else if app.loading_list {
+        } else if app.trading.loading_list {
             format!("{} Loading markets...", app.spinner())
         } else {
             "Market is not available right now.".to_string()
         };
         let focused = app.focus == LabFocus::Detail;
-        let panel = Paragraph::new(scroll_lines_to_panel(
+        let panel = scrolling_panel(
             vec![
                 Line::from(Span::styled(
                     label,
@@ -189,41 +191,38 @@ pub(in super::super) fn draw_chain_screen(
             cli,
             app.focused_panel_scroll(LabFocus::Detail),
             focused,
-        ))
-        .block(panel_block(cli, "options", Color::Cyan, focused))
-        .wrap(Wrap { trim: true });
+        )
+        .block(panel_block(cli, "options", Color::Cyan, focused));
         frame.render_widget(panel, area);
         return;
     };
 
     if area.height < 7 {
         let focused = app.focus == LabFocus::Detail;
-        let panel = Paragraph::new(scroll_lines_to_panel(
+        let panel = scrolling_panel(
             chain_summary_lines(cli, app, detail),
             area,
             cli,
             app.focused_panel_scroll(LabFocus::Detail),
             focused,
-        ))
-        .block(panel_block(cli, "options", Color::Cyan, focused))
-        .wrap(Wrap { trim: true });
+        )
+        .block(panel_block(cli, "options", Color::Cyan, focused));
         frame.render_widget(panel, area);
         return;
     }
 
-    let Some(chain_layout) = chain_layout(area) else {
+    let Some(chain_layout) = chain_layout(cli, area, app) else {
         return;
     };
     let summary_focused = app.focus == LabFocus::Detail;
-    let summary = Paragraph::new(scroll_lines_to_panel(
+    let summary = scrolling_panel(
         chain_summary_lines(cli, app, detail),
         chain_layout.summary,
         cli,
         app.focused_panel_scroll(LabFocus::Detail),
         summary_focused,
-    ))
-    .block(panel_block(cli, "options", Color::Cyan, summary_focused))
-    .wrap(Wrap { trim: true });
+    )
+    .block(panel_block(cli, "options", Color::Cyan, summary_focused));
     frame.render_widget(summary, chain_layout.summary);
 
     draw_option_side(
@@ -244,11 +243,11 @@ pub(in super::super) struct ChainLayout {
     pub(in super::super) puts: Rect,
 }
 
-pub(in super::super) fn chain_layout(area: Rect) -> Option<ChainLayout> {
+pub(in super::super) fn chain_layout(cli: &Cli, area: Rect, app: &LabApp) -> Option<ChainLayout> {
     if area.height < 7 {
         return None;
     }
-    let summary_height = chain_summary_panel_height(area.height);
+    let summary_height = chain_summary_panel_height(cli, area, app);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(summary_height), Constraint::Min(3)])
@@ -264,8 +263,14 @@ pub(in super::super) fn chain_layout(area: Rect) -> Option<ChainLayout> {
     })
 }
 
-pub(in super::super) fn chain_focus_at(area: Rect, column: u16, row: u16) -> Option<LabFocus> {
-    let layout = chain_layout(area)?;
+pub(in super::super) fn chain_focus_at(
+    cli: &Cli,
+    area: Rect,
+    app: &LabApp,
+    column: u16,
+    row: u16,
+) -> Option<LabFocus> {
+    let layout = chain_layout(cli, area, app)?;
     if rect_contains(layout.summary, column, row) {
         Some(LabFocus::Detail)
     } else if rect_contains(layout.calls, column, row) {
@@ -277,12 +282,16 @@ pub(in super::super) fn chain_focus_at(area: Rect, column: u16, row: u16) -> Opt
     }
 }
 
-pub(in super::super) fn active_order_ticket_area(area: Rect, app: &LabApp) -> Option<Rect> {
-    if app.screen != LabScreen::Chain || app.trade_ticket.is_none() {
+pub(in super::super) fn active_order_ticket_area(
+    cli: &Cli,
+    area: Rect,
+    app: &LabApp,
+) -> Option<Rect> {
+    if app.screen != LabScreen::Chain || app.trading.ticket.is_none() {
         return None;
     }
-    let layout = chain_layout(area)?;
-    let side_area = match app.chain_focus {
+    let layout = chain_layout(cli, area, app)?;
+    let side_area = match app.trading.chain_focus {
         ChainFocus::Calls => layout.calls,
         ChainFocus::Puts => layout.puts,
         ChainFocus::Markets => return None,
@@ -301,7 +310,7 @@ pub(in super::super) fn trade_ticket_field_rects(
     area: Rect,
     app: &LabApp,
 ) -> Option<TradeTicketFieldRects> {
-    let ticket = app.trade_ticket.as_ref()?;
+    let ticket = app.trading.ticket.as_ref()?;
     let inner = panel_inner_rect(area)?;
     let price_label_width = ticket.action.price_label().chars().count() as u16 + 1;
     let price_input_width = ticket_input_display_width(
@@ -375,7 +384,7 @@ pub(in super::super) fn trade_ticket_field_hit_at(
     column: u16,
     row: u16,
 ) -> Option<TradeTicketField> {
-    if app.trade_submit_is_running() || app.trade_confirmation_is_open() {
+    if app.trading.submit_is_running() || app.trading.confirmation_is_open() {
         return None;
     }
     let rects = trade_ticket_field_rects(cli, area, app)?;
@@ -543,7 +552,7 @@ pub(in super::super) fn external_link_hit_at(
     }
 
     if app.screen == LabScreen::Help && app.home_help_topic == HomeHelpTopic::Overview {
-        if app.help_article_scroll > 0 {
+        if app.help.article_scroll > 0 {
             return None;
         }
         let help = gitbook_help_layout(body.selected_area);
@@ -599,13 +608,13 @@ pub(in super::super) fn market_rail_dense_source_hit(
     source_line: usize,
 ) -> Option<MarketRailHit> {
     let mut line_index = 0usize;
-    for (market_index, dish) in app.dishes.iter().enumerate() {
+    for (market_index, dish) in app.trading.dishes.iter().enumerate() {
         if source_line == line_index {
             return Some(MarketRailHit::Market(market_index));
         }
         line_index += 1;
 
-        if market_index == app.selected && app.market_series_open {
+        if market_index == app.trading.selected && app.trading.market_series_open {
             let series = market_series_labels(app, dish);
             if series.is_empty() {
                 if source_line == line_index {
@@ -746,7 +755,7 @@ pub(in super::super) fn home_focus_at(
 }
 
 pub(in super::super) fn chart_contract_activity_area(area: Rect, app: &LabApp) -> Option<Rect> {
-    if app.chart.is_none() || area.height < 12 {
+    if app.trading.chart.is_none() || area.height < 12 {
         return None;
     }
     let rows = Layout::default()
@@ -1003,15 +1012,15 @@ pub(in super::super) fn oracle_tree_node_at_source_line(
         return Some(app.selected_oracle_node_index());
     }
     let mut cursor = 2usize;
-    if app.oracle_tree_issue.is_some() {
+    if app.oracle.tree_issue.is_some() {
         cursor += 1;
     }
-    if app.detail.is_none() {
+    if app.trading.detail.is_none() {
         cursor += 1;
     }
     cursor += 1;
 
-    let matches = tree.search_nodes(&app.oracle_search_input);
+    let matches = tree.search_nodes(&app.oracle.search_input);
     if !matches.is_empty() {
         let match_start = cursor + 1;
         let offset = source_line.checked_sub(match_start)?;
@@ -1061,7 +1070,7 @@ pub(in super::super) fn oracle_action_hit_at(
     column: u16,
     row: u16,
 ) -> Option<OracleAction> {
-    if app.oracle_form.is_some() {
+    if app.oracle.form.is_some() {
         return None;
     }
     let layout = oracle_panel_rects(cli, area, app)?;
@@ -1114,7 +1123,7 @@ pub(in super::super) fn oracle_form_field_hit_at(
     column: u16,
     row: u16,
 ) -> Option<usize> {
-    let form = app.oracle_form.as_ref()?;
+    let form = app.oracle.form.as_ref()?;
     let layout = oracle_panel_rects(cli, area, app)?;
     let actions = layout.actions?;
     let inner = panel_inner_rect(actions)?;
@@ -1226,6 +1235,7 @@ pub(in super::super) fn oracle_path_hit_at(
 }
 
 pub(in super::super) fn option_quote_hit_at(
+    cli: &Cli,
     area: Rect,
     detail: &DishDetail,
     app: &LabApp,
@@ -1233,16 +1243,16 @@ pub(in super::super) fn option_quote_hit_at(
     column: u16,
     row: u16,
 ) -> Option<usize> {
-    let layout = chain_layout(area)?;
+    let layout = chain_layout(cli, area, app)?;
     let side_area = match kind {
         OptionKind::Call => layout.calls,
         OptionKind::Put => layout.puts,
     };
     let side_focused = matches!(
-        (app.chain_focus, kind),
+        (app.trading.chain_focus, kind),
         (ChainFocus::Calls, OptionKind::Call) | (ChainFocus::Puts, OptionKind::Put)
     );
-    let side_layout = option_side_layout(side_area, side_focused && app.trade_ticket.is_some());
+    let side_layout = option_side_layout(side_area, side_focused && app.trading.ticket.is_some());
     let table_area = side_layout.table;
     let inner = panel_inner_rect(table_area)?;
     if !rect_contains(inner, column, row) || row == inner.y {
@@ -1268,14 +1278,16 @@ pub(in super::super) fn option_kind_focus(kind: OptionKind) -> LabFocus {
     }
 }
 
-pub(in super::super) fn chain_summary_panel_height(area_height: u16) -> u16 {
-    if area_height >= 18 {
-        5
-    } else if area_height >= 16 {
-        4
-    } else {
-        3
-    }
+pub(in super::super) fn chain_summary_panel_height(cli: &Cli, area: Rect, app: &LabApp) -> u16 {
+    let preferred = app.trading.detail.as_ref().map_or(5, |detail| {
+        wrapped_content_sized_panel_area(area, &chain_summary_lines(cli, app, detail), true).height
+    });
+    // Size the summary from its actual wrapped rows, not a fixed three-line
+    // assumption. Keep a table header/quote visible and, when open, preserve
+    // the minimum side-panel height needed by option_side_layout for the ticket.
+    let side_minimum = if app.trading.ticket.is_some() { 12 } else { 4 };
+    let summary_budget = area.height.saturating_sub(side_minimum).max(3);
+    preferred.max(3).min(summary_budget).min(area.height)
 }
 
 pub(in super::super) fn chain_summary_lines(
@@ -1284,9 +1296,10 @@ pub(in super::super) fn chain_summary_lines(
     detail: &DishDetail,
 ) -> Vec<Line<'static>> {
     let selected_quote = app.selected_quote();
-    let risk_preview = selected_quote.and_then(|quote| trade_risk_preview(quote, app.trade_action));
+    let risk_preview =
+        selected_quote.and_then(|quote| trade_risk_preview(quote, app.trading.action));
     let unavailable_label = selected_quote
-        .map(|quote| trade_risk_unavailable_label(quote, app.trade_action))
+        .map(|quote| trade_risk_unavailable_label(quote, app.trading.action))
         .unwrap_or("needs contract");
     let max_loss_label = risk_preview
         .map(|risk| format_usd(risk.max_loss_per_contract))
@@ -1456,7 +1469,7 @@ pub(in super::super) fn draw_option_side(
 ) {
     let indices = quote_indices_by_kind(detail, kind);
     let focused = matches!(
-        (app.chain_focus, kind),
+        (app.trading.chain_focus, kind),
         (ChainFocus::Calls, OptionKind::Call) | (ChainFocus::Puts, OptionKind::Put)
     );
     let side_name = match kind {
@@ -1473,7 +1486,7 @@ pub(in super::super) fn draw_option_side(
     } else {
         style(cli, Color::Cyan)
     };
-    let side_layout = option_side_layout(area, focused && app.trade_ticket.is_some());
+    let side_layout = option_side_layout(area, focused && app.trading.ticket.is_some());
     let table_area = side_layout.table;
     let table_width = table_area.width.saturating_sub(2);
     let depth_content_width = indices
@@ -1500,7 +1513,7 @@ pub(in super::super) fn draw_option_side(
             .enumerate()
             .map(|(row_index, index)| {
                 let quote = &detail.option_quotes[*index];
-                let selected = focused && *index == app.selected_option;
+                let selected = focused && *index == app.trading.selected_option;
                 option_side_row(
                     cli,
                     quote,
@@ -1569,14 +1582,14 @@ pub(in super::super) fn draw_order_ticket_panel(
     kind: OptionKind,
 ) {
     let focused = matches!(
-        (app.chain_focus, kind),
+        (app.trading.chain_focus, kind),
         (ChainFocus::Calls, OptionKind::Call) | (ChainFocus::Puts, OptionKind::Put)
     );
     let title = format!(
         "{} preview",
-        app.trade_action.side_label().to_ascii_lowercase()
+        app.trading.action.side_label().to_ascii_lowercase()
     );
-    let lines = match (app.trade_ticket.as_ref(), app.selected_quote()) {
+    let lines = match (app.trading.ticket.as_ref(), app.selected_quote()) {
         (Some(ticket), Some(quote)) if quote.kind == kind => trade_ticket_lines(
             cli,
             app,
@@ -1591,11 +1604,11 @@ pub(in super::super) fn draw_order_ticket_panel(
         ))],
     };
 
-    if let (Some(ticket), Some(quote)) = (app.trade_ticket.as_ref(), app.selected_quote())
+    if let (Some(ticket), Some(quote)) = (app.trading.ticket.as_ref(), app.selected_quote())
         && quote.kind == kind
         && let Some(button_area) = order_ticket_place_button_rect(area)
     {
-        let block = panel_block(cli, &title, trade_action_color(app.trade_action), focused);
+        let block = panel_block(cli, &title, trade_action_color(app.trading.action), focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1624,14 +1637,12 @@ pub(in super::super) fn draw_order_ticket_panel(
         return;
     }
 
-    let panel = Paragraph::new(scroll_lines_to_panel(lines, area, cli, 0, focused))
-        .block(panel_block(
-            cli,
-            &title,
-            trade_action_color(app.trade_action),
-            focused,
-        ))
-        .wrap(Wrap { trim: true });
+    let panel = scrolling_panel(lines, area, cli, 0, focused).block(panel_block(
+        cli,
+        &title,
+        trade_action_color(app.trading.action),
+        focused,
+    ));
     frame.render_widget(panel, area);
 }
 
@@ -1879,31 +1890,6 @@ pub(in super::super) struct TradeRiskPreview {
     pub(in super::super) max_payout_per_contract: f64,
 }
 
-#[derive(Clone)]
-pub(in super::super) struct TradeTicketSubmit {
-    pub(in super::super) args: Vec<String>,
-    pub(in super::super) envs: Vec<(String, String)>,
-    pub(in super::super) command: String,
-    pub(in super::super) summary: TradeConfirmationSummary,
-}
-
-impl std::fmt::Debug for TradeTicketSubmit {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TradeTicketSubmit")
-            .field("summary", &self.summary)
-            .field("prepared", &true)
-            .finish()
-    }
-}
-
-#[derive(Debug)]
-pub(in super::super) struct TradeSubmitLaunch {
-    pub(in super::super) submit: TradeTicketSubmit,
-    pub(in super::super) request_id: u64,
-    pub(in super::super) action: TradeAction,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in super::super) struct TradeTicketSizing {
     pub(in super::super) qty: u64,
@@ -1934,7 +1920,8 @@ pub(in super::super) fn trade_risk_preview_for_price(
     let buyer_max_gain = (width - premium).max(0.0);
     let (max_loss_per_contract, max_gain_per_contract) = match action {
         TradeAction::Buy => (buyer_max_loss, buyer_max_gain),
-        TradeAction::Sell => (buyer_max_gain, buyer_max_loss),
+        // An owned-long sale releases inventory; it never creates short exposure.
+        TradeAction::Sell => (0.0, buyer_max_loss),
     };
 
     Some(TradeRiskPreview {
@@ -1948,7 +1935,7 @@ pub(in super::super) fn trade_ticket_sizing(
     ticket: &TradeTicket,
     risk: TradeRiskPreview,
 ) -> Result<TradeTicketSizing, String> {
-    if !risk.max_loss_per_contract.is_finite() || risk.max_loss_per_contract <= 0.0 {
+    if !risk.max_loss_per_contract.is_finite() || risk.max_loss_per_contract < 0.0 {
         return Err("Could not calculate risk for this ticket.".to_string());
     }
     let qty = ticket
@@ -1985,10 +1972,10 @@ pub(in super::super) fn build_trade_ticket_submit(
     cli: &Cli,
     app: &LabApp,
 ) -> Result<TradeTicketSubmit, String> {
-    let Some(ticket) = &app.trade_ticket else {
+    let Some(ticket) = &app.trading.ticket else {
         return Err("Open an order ticket first.".to_string());
     };
-    let Some(detail) = &app.detail else {
+    let Some(detail) = &app.trading.detail else {
         return Err("Load a market before placing an order.".to_string());
     };
     let Some(quote) = app.selected_quote() else {
@@ -2028,21 +2015,25 @@ pub(in super::super) fn build_trade_ticket_submit(
     let mut envs = Vec::new();
     push_child_global_args(&mut args, &mut envs, cli, app, owner);
     args.extend([
+        "--json".to_string(),
         "trades".to_string(),
-        "prepare".to_string(),
+        "quote".to_string(),
         "--market".to_string(),
-        "<current-market-pubkey>".to_string(),
-        "--direction".to_string(),
+        detail.id.clone(),
+        "--expiry".to_string(),
+        app.selected_chart_expiry()
+            .ok_or_else(|| "Select an exact series.".to_string())?
+            .id
+            .clone(),
+        "--side".to_string(),
         match ticket.action {
-            TradeAction::Buy => "quote-for-option".to_string(),
-            TradeAction::Sell => "option-for-quote".to_string(),
+            TradeAction::Buy => "buy".to_string(),
+            TradeAction::Sell => "sell".to_string(),
         },
-        "--amount-in".to_string(),
-        "<exact-input-atoms>".to_string(),
-        "--minimum-amount-out".to_string(),
-        "<minimum-output-atoms>".to_string(),
-        "--limit-bin-id".to_string(),
-        "<limit-bin-id>".to_string(),
+        "--quantity".to_string(),
+        ticket.quantity_input.clone(),
+        "--limit-price".to_string(),
+        ticket.premium_input.clone(),
     ]);
     let command = display_command(&args);
     Ok(TradeTicketSubmit {
@@ -2052,7 +2043,10 @@ pub(in super::super) fn build_trade_ticket_submit(
         summary: TradeConfirmationSummary {
             action: ticket.action,
             symbol: detail.symbol.clone(),
-            expiry: detail.expiry_label.clone(),
+            expiry: app
+                .selected_chart_expiry()
+                .map(|e| e.id.clone())
+                .unwrap_or_default(),
             kind: quote.kind,
             lower_strike: quote.lower_strike.clone(),
             upper_strike: quote.upper_strike.clone(),
@@ -2136,10 +2130,8 @@ pub(in super::super) fn shell_word(word: &str) -> String {
 
 pub(in super::super) fn trade_route_price(quote: &OptionQuote, action: TradeAction) -> Option<f64> {
     match action {
-        TradeAction::Buy => positive_quote(quote.ask).or_else(|| positive_quote(quote.mid)),
-        TradeAction::Sell => positive_quote(quote.bid)
-            .or_else(|| positive_quote(quote.ask))
-            .or_else(|| positive_quote(quote.mid)),
+        TradeAction::Buy => positive_quote(quote.ask),
+        TradeAction::Sell => positive_quote(quote.bid),
     }
 }
 
@@ -2404,7 +2396,7 @@ pub(in super::super) fn trade_ticket_lines(
     ticket: &TradeTicket,
     width: u16,
 ) -> Vec<Line<'static>> {
-    let submitting = app.trade_submit_is_running();
+    let submitting = app.trading.submit_is_running();
     let strategy_label = match quote.kind {
         OptionKind::Call => "call spread",
         OptionKind::Put => "put spread",
@@ -2437,6 +2429,7 @@ pub(in super::super) fn trade_ticket_lines(
         (None, _) => enter_price_label.clone(),
     };
     let range_or_collateral_label = match (risk, sizing) {
+        _ if ticket.action == TradeAction::Sell => "none".to_string(),
         (Some(risk), Some(sizing)) => format_usd(risk.max_payout_per_contract * sizing.qty as f64),
         (Some(_), None) => "enter contracts".to_string(),
         (None, _) => enter_price_label.clone(),
@@ -2466,7 +2459,8 @@ pub(in super::super) fn trade_ticket_lines(
                 "type price",
                 ticket.field == TradeTicketField::Premium,
                 submitting,
-                app.trade_ticket_field_flash_visible(TradeTicketField::Premium),
+                app.trading
+                    .ticket_field_flash_visible(TradeTicketField::Premium),
                 None,
             ),
         ])
@@ -2480,7 +2474,8 @@ pub(in super::super) fn trade_ticket_lines(
                 "quantity",
                 ticket.field == TradeTicketField::Quantity,
                 submitting,
-                app.trade_ticket_field_flash_visible(TradeTicketField::Quantity),
+                app.trading
+                    .ticket_field_flash_visible(TradeTicketField::Quantity),
                 Some(Color::Red),
             ),
         ])
@@ -2493,12 +2488,26 @@ pub(in super::super) fn trade_ticket_lines(
             ));
         }
         Line::from(vec![
-            Span::styled("Max loss ", style(cli, Color::DarkGray)),
+            Span::styled(
+                if ticket.action == TradeAction::Buy {
+                    "Est. debit "
+                } else {
+                    "New exposure "
+                },
+                style(cli, Color::DarkGray),
+            ),
             Span::styled(
                 actual_max_loss_label.clone(),
                 style(cli, actual_max_loss_color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" | Max gain ", style(cli, Color::DarkGray)),
+            Span::styled(
+                if ticket.action == TradeAction::Buy {
+                    " | Est. max gain "
+                } else {
+                    " | Est. proceeds "
+                },
+                style(cli, Color::DarkGray),
+            ),
             Span::styled(
                 max_gain_label.clone(),
                 style(cli, Color::Green).add_modifier(Modifier::BOLD),
@@ -2510,7 +2519,7 @@ pub(in super::super) fn trade_ticket_lines(
             Span::styled(
                 match ticket.action {
                     TradeAction::Buy => "Gross payout ",
-                    TradeAction::Sell => "Collateral ",
+                    TradeAction::Sell => "New collateral ",
                 }
                 .to_string(),
                 style(cli, Color::DarkGray),
@@ -2580,7 +2589,8 @@ pub(in super::super) fn trade_ticket_lines(
                     "type price",
                     ticket.field == TradeTicketField::Premium,
                     submitting,
-                    app.trade_ticket_field_flash_visible(TradeTicketField::Premium),
+                    app.trading
+                        .ticket_field_flash_visible(TradeTicketField::Premium),
                     None,
                 ),
                 Span::styled(" | Contracts ", style(cli, Color::DarkGray)),
@@ -2590,17 +2600,32 @@ pub(in super::super) fn trade_ticket_lines(
                     "quantity",
                     ticket.field == TradeTicketField::Quantity,
                     submitting,
-                    app.trade_ticket_field_flash_visible(TradeTicketField::Quantity),
+                    app.trading
+                        .ticket_field_flash_visible(TradeTicketField::Quantity),
                     Some(Color::Red),
                 ),
-                Span::styled(" | Max loss ", style(cli, Color::DarkGray)),
+                Span::styled(
+                    if ticket.action == TradeAction::Buy {
+                        " | Est. debit "
+                    } else {
+                        " | New exposure "
+                    },
+                    style(cli, Color::DarkGray),
+                ),
                 Span::styled(
                     actual_max_loss_label.clone(),
                     style(cli, actual_max_loss_color).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Max gain ", style(cli, Color::DarkGray)),
+                Span::styled(
+                    if ticket.action == TradeAction::Buy {
+                        "Est. max gain "
+                    } else {
+                        "Est. proceeds "
+                    },
+                    style(cli, Color::DarkGray),
+                ),
                 Span::styled(
                     max_gain_label.clone(),
                     style(cli, Color::Green).add_modifier(Modifier::BOLD),
@@ -2608,7 +2633,7 @@ pub(in super::super) fn trade_ticket_lines(
                 Span::styled(
                     match ticket.action {
                         TradeAction::Buy => " | Gross payout ",
-                        TradeAction::Sell => " | Collateral ",
+                        TradeAction::Sell => " | New collateral ",
                     }
                     .to_string(),
                     style(cli, Color::DarkGray),
@@ -2676,7 +2701,7 @@ pub(in super::super) fn trade_ticket_next_label(
     app: &LabApp,
     ticket: &TradeTicket,
 ) -> &'static str {
-    if app.trade_submit_is_running() {
+    if app.trading.submit_is_running() {
         "Submitting..."
     } else if ticket.confirmation.is_some() {
         "Confirm in popup"

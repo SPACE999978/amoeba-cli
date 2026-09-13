@@ -149,15 +149,14 @@ pub(in super::super) fn draw_oracle_flow_panel(
     app: &LabApp,
 ) {
     let focused = app.focus == LabFocus::OracleOverview;
-    let flow = Paragraph::new(scroll_lines_to_panel(
+    let flow = scrolling_panel(
         oracle_flow_lines(cli, app),
         area,
         cli,
         app.focused_panel_scroll(LabFocus::OracleOverview),
         focused,
-    ))
-    .block(panel_block(cli, "phase timeline", Color::Cyan, focused))
-    .wrap(Wrap { trim: true });
+    )
+    .block(panel_block(cli, "phase timeline", Color::Cyan, focused));
     frame.render_widget(flow, area);
 }
 
@@ -168,15 +167,8 @@ pub(in super::super) fn draw_oracle_selected_source_panel(
     app: &LabApp,
 ) {
     let focused = false;
-    let selected = Paragraph::new(scroll_lines_to_panel(
-        oracle_overview_lines(cli, app),
-        area,
-        cli,
-        0,
-        focused,
-    ))
-    .block(panel_block(cli, "selected source", Color::Yellow, focused))
-    .wrap(Wrap { trim: true });
+    let selected = scrolling_panel(oracle_overview_lines(cli, app), area, cli, 0, focused)
+        .block(panel_block(cli, "selected source", Color::Yellow, focused));
     frame.render_widget(selected, area);
 }
 

@@ -4,48 +4,142 @@
   <img src="assets/petri-icon.png" alt="Petri ghost logo" width="128" height="128">
 </p>
 
-Petri is Amoeba's open-source command-line and terminal interface for bounded
-hardware markets. It helps users discover markets, inspect fixed-risk option
-contracts, understand maximum loss and payout, inspect collective writer sleeves and settlements,
-follow oracle evidence, stake AMBA, and connect supported workflows to agents.
+Petri is Amoeba Farm's open-source CLI/TUI. It allows users discover markets, inspect the option
+chain, inspect collective writer sleeves and settlements, follow oracle evidence, stake AMBA,
+and connect supported workflows to agents.
 
 The executable is `petri`; Amoeba remains the company and product name.
 
 > [!IMPORTANT]
-> Petri v0.1 is a pre-production Devnet source preview. The final business audit
+> Petri v0.1 is a Devnet source preview. The final business audit
 > records completed replay with approved oracle differences. It does not claim
 > exact economic or future-payoff equivalence. Package capability does not grant runtime permission.
 
-## Install from source
+## Download Petri
 
-The September 9 writer-liquidity revision includes local candidate package
-connections and build preparation. Tests, qualification, and deployment remain
-deferred; see [local build status](docs/local-candidate-build-20260909.md). The
-source exposes `writers liquidity`, `liquidity-initialize`, `liquidity-add`,
-`liquidity-remove`, and `liquidity-sweep`, together with `writers withdraw`,
-`refunds`, and `refund`. The Writers TUI uses the same operations. See
-[writer liquidity source interface](docs/writer-liquidity-source.md) for exact
-inputs and the limited buyback boundary. Existing installation pins below do
-not attest these new operations.
+Download and extract the package for your computer:
+
+| Platform | Download | Checksum |
+| --- | --- | --- |
+| Windows 10/11 x64 | [Petri for Windows](https://github.com/amoeba-farm/petri/releases/latest/download/Petri-windows-x64.zip) | [SHA-256](https://github.com/amoeba-farm/petri/releases/latest/download/Petri-windows-x64.zip.sha256) |
+| macOS 14+ Apple silicon | [Petri for Mac](https://github.com/amoeba-farm/petri/releases/latest/download/Petri-macos-arm64.zip) | [SHA-256](https://github.com/amoeba-farm/petri/releases/latest/download/Petri-macos-arm64.zip.sha256) |
+| macOS 14+ Intel | [Petri for Intel Mac](https://github.com/amoeba-farm/petri/releases/latest/download/Petri-macos-x86_64.zip) | [SHA-256](https://github.com/amoeba-farm/petri/releases/latest/download/Petri-macos-x86_64.zip.sha256) |
+
+Open `Petri.cmd` on Windows or `Petri.app` on macOS. Petri opens in a terminal.
+From an existing terminal, use `petri tui` for the interface or `petri --help` for commands.
+The downloads include the SDK runtime; Rust and Node.js are not required to launch.
+
+Windows requires Microsoft's [Visual C++ v14 x64 runtime](https://aka.ms/vc14/vc_redist.x64.exe).
+Install it first if it is not already installed, especially if Windows reports
+`VCRUNTIME140.dll` missing. This prerequisite is supplied by Microsoft, not bundled in the ZIP.
+
+This first Devnet preview is **not publisher-signed or Apple-notarized**. Verify
+the ZIP's SHA-256 before opening it. macOS may require **System Settings → Privacy
+& Security → Open Anyway** for this specific app. Do not disable system security
+globally. On Windows, compare `Get-FileHash .\Petri-windows-x64.zip -Algorithm SHA256`
+with the downloaded checksum; on macOS run `shasum -a 256 -c Petri-macos-arm64.zip.sha256`
+(substitute `x86_64` for Intel).
+
+## Install the CLI
+
+Windows PowerShell (downloads and verifies the release, adds `petri` to your user
+PATH, and creates a Start-menu shortcut):
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/amoeba-farm/petri/main/scripts/install-preview.ps1 -OutFile "$env:TEMP\install-petri-preview.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-petri-preview.ps1"
+```
+
+macOS Terminal (downloads the matching architecture, verifies checksums, and
+installs the app plus `~/.local/bin/petri`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/amoeba-farm/petri/main/scripts/install-preview.sh -o /tmp/install-petri-preview.sh
+bash /tmp/install-petri-preview.sh
+export PATH="$HOME/.local/bin:$PATH"
+petri
+```
+
+You can inspect the installer before running it. Alternatively, run the included
+`install-preview.ps1` or `install-preview.sh` from the extracted ZIP. Restart your
+Windows terminal after installation. Add the macOS PATH line to your shell profile
+to keep the command available. Update this preview by rerunning these instructions;
+the signed automatic updater does not accept unsigned preview packages.
+
+### Standalone updates
+
+Petri v0.1.4 adds release updates to Windows and Mac preview apps.
+**Older v0.1.3 downloads do not contain this feature.** Install v0.1.4 or later
+once using the instructions above to receive future updates through Petri.
+
+```bash
+petri update info
+petri update check
+petri update --restart
+```
+
+The TUI checks in the background and shows `U` when an update is available.
+Pressing `U` closes the TUI and asks before installing and reopening it. The CLI
+also asks before installing; `--yes` explicitly approves a non-interactive update.
+Close other Petri windows first. `petri tui --no-update-check` or
+`PETRI_UPDATE_CHECK=0` disables the background check.
+
+Preview updates trust only `amoeba-farm/petri` releases over HTTPS and require
+matching GitHub asset SHA-256 digests, package checksums, platform, version and
+update-channel metadata. They remain **unsigned/non-notarized previews**, not
+publisher-authenticated releases. Signed installers and source-checkout trust
+requirements are unchanged. No downloaded installer script is executed.
+
+Updates replace only owned application files, keep recovery copies, and leave
+wallets, configuration and agent registrations alone. If an update is interrupted,
+run `petri update recover` to restore the saved previous app files; use `--restart`
+to reopen the TUI afterward. This requires a writable, local, user-owned installation.
+Mac apps must retain the name `Petri.app` or `Petri Preview.app`; staging and recovery
+files are kept outside the app bundle. The most recent recovery copy is retained;
+an older verified copy is removed only after the next successful update.
+
+Source builds continue using the existing Git/Rust updater. Preview maintainers
+build with `PETRI_UPDATE_CHANNEL=preview`; this is a build-time setting, not a
+runtime trust override. `petri update info` reports the compiled channel.
+
+## SDK
+
+The [Petri SDK](https://github.com/amoeba-farm/petri-sdk) is also open source:
+
+```bash
+npm install https://github.com/amoeba-farm/petri-sdk/releases/download/v0.2.0/ameba-sdk-0.2.0.tgz
+```
+
+Its package/import name remains `ameba-sdk`. See its README for TypeScript and Rust usage.
+
+## Current capabilities
 
 The selected deployment is `spread-devnet-v3-writer-terminal-lifecycle-20260906`. Supported direct CLI/TUI
 operations use the pinned Rust SDK's governed bytes and finalized revalidation.
 Frozen, missing, paused, mismatched, or stale state prevents signing and submission.
-Staking submission and unsupported operator actions remain `not_wired`; MCP stays
-inspection and semantic-draft only.
+Unsupported operator actions remain `not_wired`. MCP public-action parity is
+source-only pending integration and tests: agents can prepare a review, then
+execute one exact operation only after explicit user authorization.
 
-The generated public source destination is `SPACE999978/amoeba-cli`. The exact
-SDK and Spread Git dependencies currently require authorized access to private
-repositories; anonymous source installation is not available. From a supplied
-source checkout with access to those exact dependencies, use:
+## Install from source
+
+Public source lives at `amoeba-farm/petri`. Its exact SDK and Spread dependencies
+are public snapshots; private-repository access is not required. For a complete
+build, install Rust 1.93.1, Node.js 22–24, and native compiler prerequisites, then:
 
 ```bash
-cargo install --locked --path . --bin petri
+git clone https://github.com/amoeba-farm/petri.git
+cd petri
+node scripts/build-sdk-runtime.mjs
+cargo build --release --locked --bin petri
+./target/release/petri --version
 petri --version
 ```
 
-Official macOS and Windows downloads are not published yet. Source installation
-creates the terminal command; it does not install a signed native app.
+On Windows the output is `target\release\petri.exe`. Linux source builds also
+require `libssl-dev`, `libudev-dev`, and `pkg-config` (Debian/Ubuntu package names).
+On macOS, run `export CARGO_PROFILE_RELEASE_LTO=false` before building; this avoids
+an LLVM bitcode incompatibility with Apple's system linker.
 
 ## Start here
 
@@ -142,10 +236,12 @@ RPC URL. It never prints keypair contents.
 Open **Connect your AI agent** in Petri, or run `petri mcp enable`, to connect
 Petri with supported AI agents. Petri can work with tools such as Claude Code,
 Codex, Gemini, and other supported agents; one-click setup currently manages
-the compatible local Codex and Claude Code registrations. MCP never resolves
-the configured wallet, opens a local keypair, contacts a hardware wallet,
-requests a transaction signature, or submits a transaction. Wallet-scoped MCP
-reads require an explicit owner public key.
+the compatible local Codex and Claude Code registrations. The source MCP action
+bridge shares public preparation and execution with CLI/TUI. `wallet.address`
+reads the locally connected public identity; wallet-scoped actions bind an explicit
+owner. `operations.execute` requires explicit approval of the exact operation ID
+and plan digest. Signing remains local; keys and private salts are never sent to
+an agent. Installation, client integration and tests for this change are deferred.
 
 If Petri detects a broken managed connection, select **Repair Petri MCP** or run
 `petri mcp repair`. Repair diagnoses the connection and rebuilds it in place
@@ -161,11 +257,10 @@ cargo build --release --locked --bin petri
 ./target/release/petri --version
 ```
 
-The public CI workflow is the reference clean-source build. It runs the locked
-public Rust suite, the current-governance boundary checker, compilation, release
-builds, script parsing, and command smokes. Commit-bound private
-`scripts/devloop.sh` results and standalone boundary checks remain additional
-release evidence. Release packages also carry the
+The preview release workflow builds the bundled SDK runtime and Rust binary on
+Windows, Apple silicon, and Intel macOS, checks startup/configuration, and packages
+checksummed downloads. Public CI performs a small source preflight. This launch
+does not rerun the comprehensive trading/test suites. Release packages also carry the
 project license, third-party inventory, and complete third-party license
 corpus.
 

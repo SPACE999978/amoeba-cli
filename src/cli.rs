@@ -194,7 +194,7 @@ pub struct Cli {
         global = true,
         env = "SOLANA_KEYPAIR",
         help_heading = "Wallet And Network",
-        help = "Keypair path or hardware wallet URL used only to resolve a wallet address for inspection; current release does not sign"
+        help = "Local keypair or hardware wallet for inspection and explicitly approved operations; never exposed to MCP"
     )]
     pub keypair: Option<String>,
     #[arg(
@@ -266,6 +266,20 @@ impl Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     #[command(
+        about = "Prepare wallet funding, staking, and Oracle participation; never signs without separate approval"
+    )]
+    Participate(crate::participation::ActionArgs),
+    #[command(about = "Private Oracle commit/reveal recovery; salts never appear in output")]
+    Commitments {
+        #[command(subcommand)]
+        command: crate::oracle_commitments::Command,
+    },
+    #[command(about = "Inspect and recover wallet operations without resubmitting")]
+    Operations {
+        #[command(subcommand)]
+        command: OperationsCommand,
+    },
+    #[command(
         about = "List markets or open a market view",
         long_about = "List markets or open a market view.\n\nUse `petri markets` for the market list, `petri markets show <market>` for the tradeable market summary, `petri markets status <market>` for the compact status view, `petri markets print <market>` for the latest oracle print, and `petri markets chart <market>` for price history."
     )]
@@ -279,8 +293,8 @@ pub enum Command {
         options: ContractsArgs,
     },
     #[command(
-        about = "Review collective-series trade inputs",
-        long_about = "Review the current collective-series trade grammar. The live governance-bridge release is byte-qualified for reads, but its governed-write SDK/ABI is unavailable, so prepare and submit both fail before backend preparation, RPC, or wallet access."
+        about = "Quote, review, buy and sell exact option series",
+        long_about = "Prepare bounded exact-input trades. Buying spends an explicit quote budget for a minimum option quantity; selling transfers owned options for minimum proceeds. Every submission revalidates the reviewed plan and current permission."
     )]
     Trades {
         #[command(subcommand)]
@@ -314,10 +328,14 @@ pub enum Command {
         command: Option<WalletCommand>,
     },
     #[command(
-        about = "View staking state (wallet changes are currently unavailable)",
+        about = "View staking state and prepare exact wallet actions",
         long_about = "View AMBA and sAMBA balances, queues, voting value, and unstaking state. Supported wallet changes require finalized V3 permission and initialized business state. Missing readiness fails closed."
     )]
     Staking {
+        #[arg(long, global = true, help = "Exact product for a staking action")]
+        market: Option<String>,
+        #[arg(long, global = true, help = "Exact listed series for a staking action")]
+        expiry: Option<String>,
         #[command(subcommand)]
         command: Option<StakingCommand>,
     },
@@ -362,6 +380,18 @@ pub enum Command {
             help = "Update Petri without reinstalling the Windows app"
         )]
         skip_shim: bool,
+        #[arg(
+            long,
+            global = true,
+            help = "Approve installing the reviewed preview release without an interactive prompt"
+        )]
+        yes: bool,
+        #[arg(
+            long,
+            global = true,
+            help = "Reopen the terminal interface after a standalone update or recovery"
+        )]
+        restart: bool,
     },
     #[command(about = "Open the interactive Lab Bench TUI")]
     Tui {
@@ -481,18 +511,12 @@ pub enum StakingCommand {
         #[command(flatten)]
         options: StakingStatusArgs,
     },
-    #[command(
-        about = "Not wired: queue AMBA",
-        long_about = "This action has no typed submission route and remains not_wired. No transaction is signed or sent."
-    )]
+    #[command(about = "Prepare AMBA staking for review; signing is a separate approval")]
     Stake {
         #[command(flatten)]
         options: StakingStakeArgs,
     },
-    #[command(
-        about = "Not wired: activate queued AMBA",
-        long_about = "This action has no typed submission route and remains not_wired. No transaction is signed or sent."
-    )]
+    #[command(about = "Prepare activation of queued AMBA for review")]
     Activate {
         #[command(flatten)]
         options: StakingActivateArgs,
@@ -502,18 +526,12 @@ pub enum StakingCommand {
         long_about = "This action has no typed submission route and remains not_wired. No transaction is signed or sent."
     )]
     Cancel,
-    #[command(
-        about = "Not wired: begin unstaking",
-        long_about = "This action has no typed submission route and remains not_wired. No transaction is signed or sent."
-    )]
+    #[command(about = "Prepare sAMBA unstaking for review")]
     Unstake {
         #[command(flatten)]
         options: StakingAmountArgs,
     },
-    #[command(
-        about = "Not wired: claim unstaked AMBA",
-        long_about = "This action has no typed submission route and remains not_wired. No transaction is signed or sent."
-    )]
+    #[command(about = "Prepare completion of a ready AMBA unstake")]
     Claim,
 }
 
@@ -851,21 +869,85 @@ pub struct CollectiveTradeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum TradesCommand {
-    #[command(
-        about = "Unavailable in the current action-mask boundary; retains trade-input parity"
-    )]
+    #[command(about = "Prepare a human-unit ticket without signing")]
+    Quote {
+        #[command(flatten)]
+        intent: crate::trade_service::TradeIntent,
+        #[arg(long, value_enum, default_value = "buy")]
+        side: TradeSide,
+    },
+    #[command(about = "Buy options using a bounded exact-input budget")]
+    Buy {
+        #[command(flatten)]
+        intent: crate::trade_service::TradeIntent,
+        #[arg(
+            long,
+            help = "Explicitly approve the fresh bounded trade; otherwise only prepare"
+        )]
+        yes: bool,
+    },
+    #[command(about = "Sell owned long options; never opens a naked short")]
+    Sell {
+        #[command(flatten)]
+        intent: crate::trade_service::TradeIntent,
+        #[arg(
+            long,
+            help = "Explicitly approve the fresh bounded sale; otherwise only prepare"
+        )]
+        yes: bool,
+    },
+    #[command(about = "Execute one previously reviewed, unexpired trade")]
+    Execute {
+        operation_id: String,
+        #[arg(long, required = true, help = "Approve this exact reviewed operation")]
+        yes: bool,
+    },
+    #[command(about = "Prepare an expert exact-input trade without signing")]
     Prepare {
         #[command(flatten)]
         trade: CollectiveTradeArgs,
     },
     #[command(
-        about = "Unavailable in the current action-mask boundary; never reaches the wallet",
-        long_about = "The command remains parseable for public grammar parity. It fails with CURRENT_PROGRAM_WRITE_ABI_UNAVAILABLE before RPC, wallet, preparation, signing, or submission."
+        about = "Prepare and submit an explicitly specified exact-input trade",
+        long_about = "The supplied amounts and limits authorize a fresh exact-input operation. Petri validates current identity, native instruction meaning and permission before local signing."
     )]
     Submit {
         #[command(flatten)]
         trade: CollectiveTradeArgs,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OperationsCommand {
+    #[command(
+        about = "Approve one exact reviewed collateral, staking, Oracle, or liquidity operation"
+    )]
+    Execute {
+        operation_id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    #[command(about = "List local operation references, optionally for one explicit owner")]
+    List {
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    #[command(about = "Show one local recovery reference; does not contact a signer")]
+    Show { operation_id: String },
+    #[command(about = "Reconcile the original operation; --watch polls for at most 30 refreshes")]
+    Status {
+        operation_id: String,
+        #[arg(long)]
+        watch: bool,
+    },
+    #[command(about = "Recover authoritative status only; never replays a transaction")]
+    Resume { operation_id: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -906,6 +988,10 @@ pub struct OptionsChainArgs {
 pub enum UpdateCommand {
     #[command(about = "Check whether Petri needs an update")]
     Check,
+    #[command(about = "Show this installation's update channel and version")]
+    Info,
+    #[command(about = "Restore the previous app files after a standalone update")]
+    Recover,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -987,6 +1073,10 @@ pub enum SettlementsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum OracleCommand {
+    #[command(
+        about = "Read exact-series carry lineage, selection progress and original opening provenance"
+    )]
+    Carry(crate::oracle_carry::Args),
     #[command(about = "Read spread-owned oracle state from Amoeba")]
     State,
     #[command(about = "List spread-owned oracle markets, or inspect one market")]
@@ -1102,7 +1192,7 @@ pub struct OracleAmbaCustodyArgs {
     #[arg(
         long,
         value_name = "MINT",
-        default_value = "4thbWUyLyTsSLfvH2YUE7BdhKh7322Hzj7AoytRvuCXZ",
+        default_value = crate::wallet_balance::DEFAULT_AMBA_MINT,
         help = "Classic SPL AMBA mint public key"
     )]
     pub mint: String,
@@ -1638,6 +1728,18 @@ pub enum OracleAmbaCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
+    #[command(hide = true, about = "Describe typed public agent actions")]
+    Actions,
+    #[command(hide = true, about = "Invoke one typed public agent action")]
+    Invoke {
+        action: String,
+        #[arg(
+            long,
+            required = true,
+            help = "Read one bounded typed JSON request from stdin"
+        )]
+        request_stdin: bool,
+    },
     #[command(about = "Show whether the managed Petri agent connection is healthy")]
     Status,
     #[command(about = "Enable the managed Petri agent connection")]
@@ -1673,8 +1775,9 @@ pub struct LiquidityArgs {
     pub entries: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum LiquidityActionValue {
+    #[default]
     Add,
     Remove,
     #[value(name = "close-position")]
@@ -1682,6 +1785,14 @@ pub enum LiquidityActionValue {
 }
 
 impl LiquidityActionValue {
+    pub fn cli_value(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::ClosePosition => "close-position",
+        }
+    }
+
     pub fn as_request_value(self) -> &'static str {
         match self {
             Self::Add => "add",
@@ -1694,8 +1805,8 @@ impl LiquidityActionValue {
 #[derive(Debug, Subcommand)]
 pub enum LiquidityCommand {
     #[command(
-        about = "Preview unsigned manager-liquidity input through Lean",
-        long_about = "Request an unsigned manager-only liquidity preview from Lean. Petri does not independently validate it with the SDK, sign it, or submit it."
+        about = "Prepare and review SDK-validated manager liquidity",
+        long_about = "Prepare an exact manager-liquidity action through Lean and independently validate it with the pinned SDK. Review the operation, then approve it with 'petri operations execute <id> --yes'."
     )]
     Plan {
         #[arg(long, value_enum, help = "Manager action to preview")]
@@ -1703,26 +1814,19 @@ pub enum LiquidityCommand {
         #[command(flatten)]
         liquidity: LiquidityArgs,
     },
-    #[command(
-        hide = true,
-        about = "Compatibility command; manager add-liquidity execution is not wired"
-    )]
+    #[command(about = "Prepare an add-liquidity action for separate approval")]
     Add {
         #[command(flatten)]
         liquidity: LiquidityArgs,
     },
-    #[command(
-        hide = true,
-        about = "Compatibility command; manager remove-liquidity execution is not wired"
-    )]
+    #[command(about = "Prepare a remove-liquidity action for separate approval")]
     Remove {
         #[command(flatten)]
         liquidity: LiquidityArgs,
     },
     #[command(
         name = "close-position",
-        hide = true,
-        about = "Compatibility command; manager position-close execution is not wired"
+        about = "Prepare a manager position close for separate approval"
     )]
     ClosePosition {
         #[command(flatten)]

@@ -6,6 +6,7 @@
 //! native instructions, and delegates broadcast/confirmation to Amoeba's
 //! typed prepared-plan submit/status routes.
 
+use crate::content_hash::sha256_hex;
 use std::{
     io::Read,
     str::FromStr,
@@ -27,7 +28,6 @@ use serde_json::{Value, json};
 use solana_hash::Hash;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_message::VersionedMessage;
-use solana_program::hash::hash;
 use solana_pubkey::Pubkey;
 use solana_transaction::{Transaction, versioned::VersionedTransaction};
 
@@ -508,6 +508,12 @@ pub fn sign_submit_validated_operation(
     let operation_id = admitted.operation_id();
     let prepared_plan_digest = admitted.prepared_plan_digest();
     let expected_signer = admitted.payer();
+    crate::mcp_actions::authorize_execution(
+        operation_id,
+        prepared_plan_digest,
+        &expected_signer.to_string(),
+    )?;
+    let _submission_claim = crate::operation_journal::reserve(backend, admitted)?;
     if instructions.is_empty() || instructions.len() > 32 {
         return Err(operation_error(
             "The admitted operation has an invalid instruction count. Nothing was signed or sent.",
@@ -518,47 +524,104 @@ pub fn sign_submit_validated_operation(
     // authority, collateral identity, and linked Light programs. It is fresh,
     // intentionally bypassing the short read cache.
     crate::chain_identity::verify_onchain_config_fresh(config)?;
-    let execution = reobserve_and_get_blockhash(config, observation, deadline_ts)?;
+    let mut execution = if admitted.swap_operation().is_some() {
+        let fresh = reobserve_finalized_state(
+            &rpc_client()?,
+            &onchain::resolve_rpc_url(config)?,
+            observation,
+            deadline_ts,
+            None,
+            false,
+        )?;
+        // A placeholder is used only for unsigned SDK preflight. The backend-owned
+        // lifetime is acquired after account validation and signer resolution.
+        FreshExecutionContext {
+            observation: fresh,
+            blockhash: Hash::default(),
+            last_valid_block_height: 0,
+        }
+    } else {
+        reobserve_and_get_blockhash(config, observation, deadline_ts)?
+    };
     let release = ameba_sdk::current_governed_write_release_v1()
         .map_err(|_| crate::current_release::write_unavailable_error())?;
-    let signing = governed::read_snapshot(
+    let signing_snapshot = governed::read_snapshot(
         config,
         &release,
         Some(observation),
         execution.observation.slot,
         deadline_ts,
         false,
-    )?
-    .with_view(|view| {
-        let prepared = if admitted.requires_versioned_signing() {
-            ameba_sdk::prepare_current_governed_versioned_signing_v1(
-                admitted,
-                &release,
-                view,
-                0,
-                execution.blockhash,
-            )
-            .map(CurrentOperationSigning::Versioned)
-        } else {
-            ameba_sdk::prepare_current_governed_signing_v1(
-                admitted,
-                &release,
-                view,
-                0,
-                execution.blockhash,
-            )
-            .map(CurrentOperationSigning::Legacy)
-        };
-        prepared.map_err(|_| {
-            operation_error("The current operation changed before signing. Prepare it again.")
+    )?;
+    let prepare_signing = |blockhash| {
+        signing_snapshot.with_view(|view| {
+            let prepared = if admitted.requires_versioned_signing() {
+                ameba_sdk::prepare_current_governed_versioned_signing_v1(
+                    admitted, &release, view, 0, blockhash,
+                )
+                .map(CurrentOperationSigning::Versioned)
+            } else {
+                ameba_sdk::prepare_current_governed_signing_v1(
+                    admitted, &release, view, 0, blockhash,
+                )
+                .map(CurrentOperationSigning::Legacy)
+            };
+            prepared.map_err(|_| {
+                operation_error("The current operation changed before signing. Prepare it again.")
+            })
         })
-    })?;
+    };
+    let mut signing = prepare_signing(execution.blockhash)?;
 
     // The signing-source load used to produce the signature is deliberately
     // after both deployment verification and full finalized re-observation.
     // Request preparation may already have resolved the same source's public
     // key so Lean can bind the actor; equality is checked again here.
     with_final_admitted_signer(config, &expected_signer, |signer| {
+        if admitted.swap_operation().is_some() {
+            let response = backend.post_json(crate::endpoints::dlmm_trade_lifetime(), &json!({
+                "operationId":operation_id,"preparedPlanDigest":prepared_plan_digest,"owner":expected_signer.to_string()
+            }))?;
+            let data = operation_data(&response, "trade transaction lifetime")?;
+            let lifetime = data
+                .get("transactionLifetime")
+                .ok_or_else(|| operation_error("Trade lifetime is missing."))?;
+            if lifetime["schemaVersion"] != 1
+                || lifetime["operationId"] != operation_id
+                || lifetime["preparedPlanDigest"] != prepared_plan_digest
+                || lifetime["commitment"] != "finalized"
+            {
+                return Err(operation_error(
+                    "Trade lifetime does not match the reviewed operation.",
+                ));
+            }
+            let slot = lifetime["contextSlot"]
+                .as_u64()
+                .filter(|s| *s >= execution.observation.slot)
+                .ok_or_else(|| operation_error("Trade lifetime observation is stale."))?;
+            let acquired = lifetime["acquiredAt"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .ok_or_else(|| operation_error("Trade lifetime has no valid observation time."))?;
+            let age = chrono::Utc::now()
+                .signed_duration_since(acquired)
+                .num_seconds();
+            if !(0..=30).contains(&age) {
+                return Err(operation_error(
+                    "Trade lifetime expired before signing. Prepare a fresh review.",
+                ));
+            }
+            execution.blockhash = lifetime["blockhash"]
+                .as_str()
+                .and_then(|s| Hash::from_str(s).ok())
+                .ok_or_else(|| operation_error("Trade lifetime blockhash is invalid."))?;
+            execution.last_valid_block_height = lifetime["lastValidBlockHeight"]
+                .as_u64()
+                .filter(|h| *h > 0)
+                .ok_or_else(|| operation_error("Trade lifetime height is invalid."))?;
+            execution.observation.slot = slot;
+            signing = prepare_signing(execution.blockhash)?;
+        }
         let message = match &signing {
             CurrentOperationSigning::Legacy(signing) => {
                 VersionedMessage::Legacy(signing.message().clone())
@@ -637,13 +700,21 @@ pub fn sign_submit_validated_operation(
             };
             result.map_err(|_| operation_error("The approved operation or current governance changed. The transaction was signed locally but not submitted."))
         })?;
+        crate::operation_journal::before_relay(
+            backend,
+            admitted,
+            expected_operation,
+            &signature,
+            &transaction_sha256,
+            &message_sha256,
+        )?;
         let submit_error = submission_result_error(
             backend.post_json(submit_path, &submission),
             operation_id,
             prepared_plan_digest,
             signed_binding,
         );
-        wait_for_typed_operation_confirmation(
+        let confirmation = wait_for_typed_operation_confirmation(
             backend,
             status_path,
             operation_id,
@@ -651,7 +722,41 @@ pub fn sign_submit_validated_operation(
             expected_operation,
             signed_binding,
             submit_error,
-        )?;
+        );
+        if let Err(error) = confirmation {
+            if let Ok(record) = crate::operation_journal::load(operation_id) {
+                match recover_finalized_signature(backend, &record) {
+                    Ok(Some(("confirmed", _))) => {}
+                    Ok(Some(("failed_on_chain", _))) => {
+                        crate::operation_journal::failed_on_chain(operation_id)?;
+                        return Err(CliError::confirmed_failure(
+                            "The original transaction finalized with an execution error. Inspect its operation receipt before preparing a new action.",
+                            operation_id,
+                            &signature,
+                        ));
+                    }
+                    _ => {
+                        return Err(CliError::uncertain(
+                            format!(
+                                "{error} Operation {operation_id}; signature {signature}. Use petri operations resume {operation_id}; do not resubmit."
+                            ),
+                            operation_id,
+                            &signature,
+                        ));
+                    }
+                }
+            } else {
+                return Err(CliError::uncertain(
+                    format!(
+                        "{error} Operation {operation_id}; signature {signature}. Use petri operations resume {operation_id}; do not resubmit."
+                    ),
+                    operation_id,
+                    &signature,
+                ));
+            }
+        }
+        crate::operation_journal::confirmed(operation_id).map_err(|error|CliError::uncertain(
+            format!("The transaction was confirmed, but its local receipt could not be saved: {error}. Recover this operation; do not resubmit."),operation_id,&signature))?;
         Ok(CurrentOperationReceipt {
             signature,
             operation_id: operation_id.to_owned(),
@@ -661,6 +766,171 @@ pub fn sign_submit_validated_operation(
             instruction_count: instructions.len(),
         })
     })
+}
+
+pub fn validate_recovered_operation(
+    record: &crate::operation_journal::OperationRecord,
+    response: &Value,
+) -> Result<&'static str, CliError> {
+    if let (Some(signature), Some(transaction), Some(message)) = (
+        &record.signature,
+        &record.transaction_sha256,
+        &record.message_sha256,
+    ) {
+        let status = validate_operation_status_response(
+            response,
+            &record.operation_id,
+            &record.prepared_plan_digest,
+            &record.operation,
+            SignedTransactionBinding {
+                signature,
+                transaction_sha256: transaction,
+                message_sha256: message,
+            },
+        )?;
+        return Ok(match status.operation {
+            OperationStatus::Confirmed => "confirmed",
+            OperationStatus::Failed => "rejected",
+            OperationStatus::Pending => "pending",
+            OperationStatus::Submitted => "submitted",
+            OperationStatus::Prepared => "transport_uncertain",
+        });
+    }
+    let data = operation_data(response, "operation recovery")?;
+    validate_operation_binding(data, &record.operation_id, &record.prepared_plan_digest)?;
+    if data["status"] == "prepared"
+        && data["operation"] == record.operation
+        && data["nextBatchIndex"] == 0
+        && data["batchCount"] == 1
+        && data["submissions"] == json!([])
+    {
+        return Ok("prepared");
+    }
+    // Without a local signature binding, a server status must not certify a payment.
+    Ok("needs_fresh_preparation")
+}
+
+pub fn read_trade_market(
+    config: &OnchainConfig,
+    series: &str,
+) -> Result<(Pubkey, ameba_sdk::state::Market, u64), CliError> {
+    crate::chain_identity::verify_onchain_config_fresh(config)?;
+    if !series.is_ascii() || series.len() > 32 {
+        return Err(operation_error("Series label is invalid."));
+    }
+    let mut series_id = [0u8; 32];
+    series_id[..series.len()].copy_from_slice(series.as_bytes());
+    let address = ameba_sdk::derive_market_pda(&ameba_sdk::ID, &series_id).0;
+    let client = rpc_client()?;
+    let url = onchain::resolve_rpc_url(config)?;
+    let result = rpc_result(
+        &client,
+        &url,
+        "getAccountInfo",
+        json!([address.to_string(), {"encoding":"base64","commitment":"finalized"}]),
+    )?;
+    let slot = result
+        .pointer("/context/slot")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| operation_error("Market observation has no finalized slot."))?;
+    let value = &result["value"];
+    let owner = canonical_pubkey(value["owner"].as_str().unwrap_or_default(), "market owner")?;
+    let bytes = rpc_account_data(value)?;
+    let market = ameba_sdk::decode_current_market(
+        ameba_sdk::CurrentAccountData {
+            address,
+            owner,
+            executable: value["executable"]
+                .as_bool()
+                .ok_or_else(|| operation_error("Market executable flag is missing."))?,
+            data: &bytes,
+        },
+        &ameba_sdk::ID,
+    )
+    .map_err(|_| operation_error("The exact series does not match the current market contract."))?;
+    if market.market_id != series_id {
+        return Err(operation_error("Market and selected series differ."));
+    }
+    let time = rpc_result(&client, &url, "getBlockTime", json!([slot]))?
+        .as_u64()
+        .ok_or_else(|| operation_error("Market observation time is unavailable."))?;
+    Ok((address, market, time))
+}
+
+/// Read-only recovery never loads a signer and never creates a new transaction.
+pub fn recover_finalized_signature(
+    backend: &BackendClient,
+    record: &crate::operation_journal::OperationRecord,
+) -> Result<Option<(&'static str, Value)>, CliError> {
+    record.require_scope(backend, &record.owner)?;
+    let signature = record
+        .signature
+        .as_deref()
+        .ok_or_else(|| operation_error("No original signature recorded."))?;
+    let owner = canonical_pubkey(&record.owner, "operation owner")?;
+    let config = OnchainConfig {
+        network: "devnet".into(),
+        backend_url: backend.base_url().into(),
+        commitment: Some("finalized".into()),
+        keypair_path: None,
+        allow_insecure_keypair: false,
+    };
+    crate::chain_identity::verify_onchain_config_fresh(&config)?;
+    let client = rpc_client()?;
+    let url = onchain::resolve_rpc_url(&config)?;
+    let result = rpc_result(
+        &client,
+        &url,
+        "getTransaction",
+        json!([signature,
+        {"encoding":"base64","commitment":"finalized","maxSupportedTransactionVersion":0}]),
+    )?;
+    if result.is_null() {
+        return Ok(None);
+    }
+    let encoded = result["transaction"]
+        .as_array()
+        .filter(|a| a.len() == 2 && a[1] == "base64")
+        .and_then(|a| a[0].as_str())
+        .filter(|s| s.len() <= MAX_TRANSACTION_BYTES * 2)
+        .ok_or_else(|| operation_error("Finalized receipt has no bounded transaction packet."))?;
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| operation_error("Finalized packet is malformed."))?;
+    if bytes.len() > MAX_TRANSACTION_BYTES
+        || record.transaction_sha256.as_deref() != Some(sha256_hex(&bytes).as_str())
+    {
+        return Err(operation_error(
+            "Finalized transaction differs from the original signed packet.",
+        ));
+    }
+    let tx: VersionedTransaction = bincode::deserialize(&bytes)
+        .map_err(|_| operation_error("Finalized transaction cannot be decoded."))?;
+    let message = verify_final_signed_versioned_transaction(&tx, owner)?;
+    if tx.signatures.first().map(ToString::to_string).as_deref() != Some(signature)
+        || record.message_sha256.as_deref() != Some(sha256_hex(&message).as_str())
+    {
+        return Err(operation_error(
+            "Finalized signature or message differs from the original operation.",
+        ));
+    }
+    let slot = result["slot"]
+        .as_u64()
+        .filter(|s| *s > 0)
+        .ok_or_else(|| operation_error("Finalized receipt has no slot."))?;
+    let error = result
+        .pointer("/meta/err")
+        .ok_or_else(|| operation_error("Finalized receipt has no execution result."))?;
+    let state = if error.is_null() {
+        "confirmed"
+    } else {
+        "failed_on_chain"
+    };
+    Ok(Some((
+        state,
+        json!({"source":"finalized_chain","signature":signature,"slot":slot.to_string(),
+        "commitment":"finalized","state":state,"error":error,"retryAuthorized":false}),
+    )))
 }
 
 fn verify_final_signed_versioned_transaction(
@@ -1457,14 +1727,6 @@ fn rpc_account_data(value: &Value) -> Result<Vec<u8>, CliError> {
         ));
     }
     Ok(data)
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    hash(data)
-        .to_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 fn require_private_provider_witness_digest(raw: &str, label: &str) -> Result<(), CliError> {

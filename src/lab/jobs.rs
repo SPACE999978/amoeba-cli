@@ -119,7 +119,7 @@ pub(super) fn spawn_ledger_fetch(
             .and_then(|backend| {
                 backend
                     .get(&endpoints::dlmm_positions(&owner))
-                    .and_then(crate::current_backend_payload)
+                    .and_then(crate::backend::current_backend_payload)
                     .and_then(|response| positions::project_liquidity_positions(&response, &owner))
             }) {
             Ok(payload) => Some(payload),
@@ -304,23 +304,20 @@ pub(super) fn spawn_trade_submit(
                     .map_err(|error| format!("could not start order submit: {error}"))
             })
             .and_then(|output| {
-                let stdout = compact_process_output(&output.stdout);
-                let stderr = compact_process_output(&output.stderr);
+                let id = args.iter().position(|a| a=="execute").and_then(|i|args.get(i+1)).map(String::as_str).unwrap_or("unknown");
+                let payload = serde_json::from_slice::<Value>(&output.stdout).ok();
                 if output.status.success() {
-                    Ok(if stdout.is_empty() {
-                        "order submitted".to_string()
-                    } else {
-                        stdout
-                    })
+                    let payload = payload.filter(|v| v["ok"]==true && v.pointer("/receipt/operationId").and_then(Value::as_str)==Some(id)
+                        && v.pointer("/receipt/signature").and_then(Value::as_str).is_some_and(|s|!s.is_empty()))
+                        .ok_or_else(||format!("Receipt missing or mismatched. Use petri operations resume {id}; do not resubmit."))?;
+                    Ok(crate::trade_service::render_response(&payload))
                 } else {
-                    Err(if stderr.is_empty() {
-                        if stdout.is_empty() {
-                            format!("order submit exited with {}", output.status)
-                        } else {
-                            stdout
-                        }
-                    } else {
-                        stderr
+                    let message = payload.as_ref().and_then(|v|v.pointer("/error/message")).and_then(Value::as_str);
+                    let pending = payload.as_ref().and_then(|v|v.pointer("/error/category")).and_then(Value::as_str)==Some("pending");
+                    Err(match message {
+                        Some(message) if pending => format!("{message}\nUse petri operations resume {id}; do not resubmit."),
+                        Some(message) => format!("{message}\nOperation {id}; inspect its record with F8."),
+                        None => format!("Trade process ended without a qualified receipt ({}). Use petri operations resume {id}; do not resubmit.",output.status),
                     })
                 }
             });
@@ -329,6 +326,46 @@ pub(super) fn spawn_trade_submit(
             action,
             summary,
             command,
+            result,
+        });
+    });
+}
+
+pub(super) fn spawn_trade_prepare(
+    submit: TradeTicketSubmit,
+    fetch_tx: Sender<LabFetchResult>,
+    request_id: u64,
+    owner: String,
+    expiry: String,
+) {
+    thread::spawn(move || {
+        let result = env::current_exe()
+            .map_err(|_| "Could not locate Petri.".to_string())
+            .and_then(|exe| {
+                ProcessCommand::new(exe)
+                    .args(&submit.args)
+                    .envs(submit.envs.iter().cloned())
+                    .output()
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|output| {
+                if !output.status.success() {
+                    let parsed = serde_json::from_slice::<Value>(&output.stdout).ok();
+                    return Err(parsed
+                        .as_ref()
+                        .and_then(|v| v.pointer("/error/message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| compact_process_output(&output.stderr)));
+                }
+                serde_json::from_slice(&output.stdout)
+                    .map_err(|_| "The prepared trade response could not be read.".to_string())
+            });
+        let _ = fetch_tx.send(LabFetchResult::TradePrepare {
+            request_id,
+            owner,
+            expiry,
+            submit,
             result,
         });
     });
@@ -912,7 +949,7 @@ pub(super) fn spawn_oracle_rewards_fetch(
 
 pub(super) fn spawn_update_check(fetch_tx: Sender<LabFetchResult>, request_id: u64) {
     thread::spawn(move || {
-        let result = workspace_update::check_workspace_update(false)
+        let result = crate::update::check_for_tui(false)
             .map_err(|error| user_facing_update_check_error(&error.to_string()));
         let _ = fetch_tx.send(LabFetchResult::UpdateCheck { request_id, result });
     });

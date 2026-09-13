@@ -9,7 +9,7 @@ use crate::{
     onchain::{OnchainConfig, resolve_rpc_url},
 };
 
-pub const DEFAULT_AMBA_MINT: &str = "4thbWUyLyTsSLfvH2YUE7BdhKh7322Hzj7AoytRvuCXZ";
+pub const DEFAULT_AMBA_MINT: &str = "Hy1LfQLL4zLQihmiQKZm7DQzXm5K8aVSfKtdHFYXbKMm";
 pub const DEFAULT_AMBA_VAULT_TOKEN_ACCOUNT: &str = "CawSd1hKG9fBbBnNDQRnhtP5oHMWwy6quWFj4EWxxxMz";
 
 pub fn resolve_wallet_usdc_mint(

@@ -4,7 +4,7 @@ use super::*;
 
 impl LabApp {
     pub(super) fn open_detail(&mut self) {
-        self.detail_view = DetailView::Overview;
+        self.trading.detail_view = DetailView::Overview;
         self.set_screen(LabScreen::Detail);
         self.status = "market details".to_string();
     }
@@ -15,7 +15,7 @@ impl LabApp {
         backend_url: &str,
         fetch_tx: &Sender<LabFetchResult>,
     ) {
-        self.detail_view = view;
+        self.trading.detail_view = view;
         self.reset_panel_scroll(LabFocus::Detail);
         if view == DetailView::Settlement {
             self.request_settlement(backend_url, fetch_tx, false);
@@ -32,7 +32,7 @@ impl LabApp {
     ) {
         let current = DetailView::ALL
             .iter()
-            .position(|view| *view == self.detail_view)
+            .position(|view| *view == self.trading.detail_view)
             .unwrap_or(0) as isize;
         let next = (current + offset).rem_euclid(DetailView::ALL.len() as isize) as usize;
         self.select_detail_view(DetailView::ALL[next], backend_url, fetch_tx);
@@ -86,8 +86,15 @@ impl LabApp {
                 Ok(())
             };
         }
-        crate::staking::require_typed_staking_submission()
-            .map_err(|_| "Staking submission is not_wired.".to_string())
+        if !self.wallet.is_attached() {
+            return Err("Attach a wallet before preparing a staking action.".into());
+        }
+        if action == StakingAction::CancelQueue {
+            return Err(
+                "The current SDK does not expose a public queued-stake cancellation action.".into(),
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn activate_staking_action(&mut self, fetch_tx: &Sender<LabFetchResult>) {
@@ -106,6 +113,17 @@ impl LabApp {
         }
         if let Err(error) = self.staking_action_availability(action) {
             self.status = error;
+            return;
+        }
+        let current = match action {
+            StakingAction::Stake => Some(crate::participation::Action::Stake),
+            StakingAction::Activate => Some(crate::participation::Action::ActivateStake),
+            StakingAction::Unstake => Some(crate::participation::Action::Unstake),
+            StakingAction::Claim => Some(crate::participation::Action::CompleteUnstake),
+            _ => None,
+        };
+        if let Some(current) = current {
+            self.open_specific_action(current);
             return;
         }
         self.staking_action_result = None;

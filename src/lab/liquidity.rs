@@ -9,13 +9,7 @@
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum LiquidityPreviewAction {
-    #[default]
-    Add,
-    Remove,
-    ClosePosition,
-}
+pub(super) use crate::cli::LiquidityActionValue as LiquidityPreviewAction;
 
 impl LiquidityPreviewAction {
     const ALL: [Self; 3] = [Self::Add, Self::Remove, Self::ClosePosition];
@@ -25,22 +19,6 @@ impl LiquidityPreviewAction {
             Self::Add => "Add",
             Self::Remove => "Remove",
             Self::ClosePosition => "Close position",
-        }
-    }
-
-    fn cli_value(self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Remove => "remove",
-            Self::ClosePosition => "close-position",
-        }
-    }
-
-    fn response_value(self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Remove => "remove",
-            Self::ClosePosition => "close_position",
         }
     }
 
@@ -283,7 +261,7 @@ impl LabApp {
         self.liquidity_preview_result = None;
         self.liquidity_preview_form = None;
         self.status =
-            "Loading unsigned Lean preview; Petri will not prepare, sign, or submit.".to_string();
+            "Preparing SDK-validated liquidity review; nothing will be signed.".to_string();
         spawn_liquidity_preview(
             args,
             envs,
@@ -309,7 +287,7 @@ impl LabApp {
         self.liquidity_preview_form = None;
         match result {
             Ok(payload) => {
-                let message = "Unsigned Lean preview ready. It is not independently SDK-validated and nothing was prepared, signed, or submitted."
+                let message = "SDK-validated liquidity review ready. Nothing signed or submitted. Open F9 to review and approve the operation."
                     .to_string();
                 self.liquidity_preview_result = Some(LiquidityPreviewResult {
                     ok: true,
@@ -433,7 +411,7 @@ pub(super) fn validate_liquidity_preview_response(
     payload: &Value,
     binding: &LiquidityPreviewBinding,
 ) -> Result<(), String> {
-    let request = payload.get("request").unwrap_or(&Value::Null);
+    let request = payload.get("review").unwrap_or(&Value::Null);
     let field = |key: &str| request.get(key).and_then(Value::as_str);
     let entries = request
         .get("entries")
@@ -443,16 +421,16 @@ pub(super) fn validate_liquidity_preview_response(
     let exact = field("ownerPubkey") == Some(binding.owner_pubkey.as_str())
         && field("marketId") == Some(binding.market.as_str())
         && field("expiryId") == Some(binding.expiry.as_str())
-        && field("action") == Some(binding.action.response_value())
+        && field("action") == Some(binding.action.as_request_value())
         && field("positionNonce") == Some(binding.position_nonce.as_str())
         && entries.as_ref() == Some(&binding.entries)
         && signing.get("willSign").and_then(Value::as_bool) == Some(false)
         && signing.get("willSubmit").and_then(Value::as_bool) == Some(false)
         && payload
-            .get("executionAuthority")
-            .and_then(|value| value.get("status"))
+            .get("operation")
+            .and_then(|value| value.get("state"))
             .and_then(Value::as_str)
-            == Some("not_wired");
+            == Some("prepared");
     if exact {
         Ok(())
     } else {

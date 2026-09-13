@@ -3,6 +3,15 @@
 use super::*;
 
 pub(super) enum LabFetchResult {
+    ActionPanel {
+        id: u64,
+        executed: bool,
+        result: Result<Value, String>,
+    },
+    ReadPanel {
+        id: u64,
+        result: Result<(String, Vec<String>), String>,
+    },
     MarketList {
         request_id: u64,
         result: Result<Value, String>,
@@ -66,6 +75,13 @@ pub(super) enum LabFetchResult {
         summary: TradeConfirmationSummary,
         command: String,
         result: Result<String, String>,
+    },
+    TradePrepare {
+        request_id: u64,
+        owner: String,
+        expiry: String,
+        submit: TradeTicketSubmit,
+        result: Result<Value, String>,
     },
     OracleTree {
         request_id: u64,

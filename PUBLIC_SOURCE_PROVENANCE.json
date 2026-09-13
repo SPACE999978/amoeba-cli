@@ -1,10 +1,11 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "94c5b8014a70eb46408d4304eea237331640f105",
+  "sourceCommit": "e527bc9388365d47f8f7b2c5cbc4452cedce69ce",
   "sourceDirty": false,
-  "policySha256": "d40e9f8e92a6c107c404105a749494c88fc83298264995e00cacb0b740ceda1c",
-  "exportedFileCount": 185,
-  "exportedTreeSha256": "dc37ad7cd228d944e059712c65face784c68950f599fc6d074f54462be894f3b",
+  "policySha256": "0a04c54f19b18cb294d26ea94413113354c984ffa52c58048db26479c51ea680",
+  "exportedFileCount": 239,
+  "exportedTreeSha256": "f1250d4a9fe662549e10ef64703f1c988917d032f4348762ce770276c031dc87",
   "treeDigestIncludesExecutableModes": true,
-  "treeDigestExcludesThisProvenanceFile": true
+  "treeDigestExcludesThisProvenanceFile": true,
+  "hashEncoding": "Canonical Git blob bytes and indexed executable modes; independent of checkout line endings"
 }

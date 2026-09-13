@@ -9,15 +9,14 @@ pub(in super::super) fn draw_oracle_intro_screen(
     app: &LabApp,
 ) {
     let focused = app.focus == LabFocus::OracleIntro;
-    let intro = Paragraph::new(scroll_lines_to_panel(
+    let intro = scrolling_panel(
         oracle_intro_lines(cli, app, focused),
         area,
         cli,
         app.focused_panel_scroll(LabFocus::OracleIntro),
         focused,
-    ))
-    .block(panel_block(cli, "oracle entry", Color::Magenta, focused))
-    .wrap(Wrap { trim: true });
+    )
+    .block(panel_block(cli, "oracle entry", Color::Magenta, focused));
     frame.render_widget(intro, area);
 }
 
@@ -68,7 +67,7 @@ pub(in super::super) fn oracle_intro_lines(
         lines.push(oracle_intro_action_line(
             cli,
             action,
-            index == app.oracle_intro_selected,
+            index == app.oracle.intro_selected,
             focused,
         ));
     }
@@ -111,27 +110,19 @@ pub(in super::super) fn draw_oracle_help_screen(
 ) {
     let focused = app.focus == LabFocus::OracleHelp;
     let layout = oracle_help_layout(area);
-    let help = Paragraph::new(scroll_lines_to_panel(
+    let help = scrolling_panel(
         oracle_help_lines(cli, app),
         layout.help_area,
         cli,
         app.focused_panel_scroll(LabFocus::OracleHelp),
         focused,
-    ))
-    .block(panel_block(cli, "oracle help", Color::Cyan, focused))
-    .wrap(Wrap { trim: true });
+    )
+    .block(panel_block(cli, "oracle help", Color::Cyan, focused));
     frame.render_widget(help, layout.help_area);
 
     if let Some(links_area) = layout.links_area {
-        let links = Paragraph::new(scroll_lines_to_panel(
-            oracle_help_link_lines(cli, app),
-            links_area,
-            cli,
-            0,
-            false,
-        ))
-        .block(panel_block(cli, "docs and terms", Color::Yellow, false))
-        .wrap(Wrap { trim: true });
+        let links = scrolling_panel(oracle_help_link_lines(cli, app), links_area, cli, 0, false)
+            .block(panel_block(cli, "docs and terms", Color::Yellow, false));
         frame.render_widget(links, links_area);
     }
 }

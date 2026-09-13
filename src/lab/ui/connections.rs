@@ -56,6 +56,20 @@ pub(in super::super) fn agent_connection_button_rect(area: Rect) -> Option<Rect>
     agent_connection_layout(area).button_area
 }
 
+fn agent_connection_padding(area: Rect) -> u16 {
+    (area.width.saturating_sub(4) / 2).min(2)
+}
+
+// Keep wrapping and overflow geometry identical to the padded Paragraph.
+pub(in super::super) fn agent_connection_text_panel(area: Rect) -> Rect {
+    let padding = agent_connection_padding(area);
+    Rect {
+        x: area.x.saturating_add(padding),
+        width: area.width.saturating_sub(padding * 2),
+        ..area
+    }
+}
+
 pub(in super::super) fn draw_agent_connection_screen(
     frame: &mut Frame<'_>,
     cli: &Cli,
@@ -64,20 +78,19 @@ pub(in super::super) fn draw_agent_connection_screen(
 ) {
     let focused = app.focus == LabFocus::Help;
     let layout = agent_connection_layout(area);
-    let help = Paragraph::new(scroll_lines_to_panel(
-        home_help_agent_lines(cli, app),
-        layout.help_area,
+    let text_panel = agent_connection_text_panel(layout.help_area);
+    let help = scrolling_panel(
+        home_help_agent_lines_for_width(cli, app, text_panel.width.saturating_sub(2)),
+        text_panel,
         cli,
         app.focused_panel_scroll(LabFocus::Help),
         focused,
-    ))
-    .block(panel_block(
-        cli,
-        "connect your AI agent",
-        Color::Magenta,
-        focused,
-    ))
-    .wrap(Wrap { trim: true });
+    )
+    .block(
+        panel_block(cli, "connect your AI agent", Color::Magenta, focused).padding(
+            ratatui::widgets::Padding::horizontal(agent_connection_padding(layout.help_area)),
+        ),
+    );
     frame.render_widget(help, layout.help_area);
 
     if let Some(button_area) = layout.button_area {
@@ -104,15 +117,8 @@ pub(in super::super) fn draw_agent_connection_screen(
     }
 
     if let Some(links_area) = layout.links_area {
-        let links = Paragraph::new(scroll_lines_to_panel(
-            home_help_link_lines(cli, app),
-            links_area,
-            cli,
-            0,
-            false,
-        ))
-        .block(panel_block(cli, "learn more", Color::Cyan, false))
-        .wrap(Wrap { trim: true });
+        let links = scrolling_panel(home_help_link_lines(cli, app), links_area, cli, 0, false)
+            .block(panel_block(cli, "learn more", Color::Cyan, false));
         frame.render_widget(links, links_area);
     }
 }
@@ -142,107 +148,78 @@ pub(in super::super) fn home_help_link_lines(cli: &Cli, app: &LabApp) -> Vec<Lin
     ]
 }
 
-pub(in super::super) fn home_help_lines(cli: &Cli, app: &LabApp) -> Vec<Line<'static>> {
-    match app.home_help_topic {
-        HomeHelpTopic::Overview => home_help_overview_lines(cli),
-        HomeHelpTopic::Agents => home_help_agent_lines(cli, app),
-    }
-}
-
-pub(in super::super) fn home_help_overview_lines(cli: &Cli) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            "What Amoeba Farm is",
-            style(cli, Color::Cyan).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "Amoeba Farm is a market and oracle system for synthetic exposure to hardware and industrial input markets.",
-            style(cli, Color::White),
-        )),
-        Line::from(Span::styled(
-            "It turns scattered hardware price information into defined monthly markets, transparent oracle recipes, and bounded-risk contracts.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(Span::styled(
-            "In v1, users trade fixed-risk monthly exposure to a published settlement result, not physical delivery.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "What each home lane does",
-            style(cli, Color::Yellow).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "Trade options: browse capped call and put spreads, then review max loss and max payout before trading.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(Span::styled(
-            "View chart: inspect fair price, recent movement, volume, and liquidity for the selected market.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(Span::styled(
-            "Oracle evidence: see the source trail and settlement rules that decide the monthly result.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(Span::styled(
-            "Wallet ledger: review recent wallet activity, Amoeba trades, and indexed account history.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(Span::styled(
-            "Staking: queue AMBA for seven days, activate it into transferable sAMBA, track embedded rewards, or cancel the queue.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Use the links panel for the GitBook and Terms of Service. Open Connect your AI agent from Home for MCP setup.",
-            style(cli, Color::DarkGray),
-        )),
-    ]
-}
-
-pub(in super::super) fn home_help_agent_lines(cli: &Cli, app: &LabApp) -> Vec<Line<'static>> {
+pub(in super::super) fn home_help_agent_lines_for_width(
+    cli: &Cli,
+    app: &LabApp,
+    width: u16,
+) -> Vec<Line<'static>> {
     let (status_text, status_color) = match app.mcp_connection_state {
-        McpConnectionState::Disabled => ("Not enabled on this computer", Color::Gray),
-        McpConnectionState::Enabled => ("Enabled on this computer", Color::Green),
-        McpConnectionState::NeedsRepair => ("Repair available", Color::Yellow),
-        McpConnectionState::Conflict => ("An existing Petri connection was found", Color::Yellow),
+        McpConnectionState::Disabled => ("Not connected", Color::Gray),
+        McpConnectionState::Enabled => ("Connected", Color::Green),
+        McpConnectionState::NeedsRepair => ("Needs repair", Color::Yellow),
+        McpConnectionState::Conflict => ("Existing connection found", Color::Yellow),
     };
-    let action_hint = match app.mcp_connection_action() {
-        McpConnectionAction::Blocked => "This existing connection was left unchanged.",
-        McpConnectionAction::Repair => {
-            "Select Repair to diagnose and rebuild Petri's connection in place."
-        }
-        _ => "Click the button or press Enter. Restart an AI agent that is already open.",
+    let action_lines: &[&str] = match app.mcp_connection_action() {
+        McpConnectionAction::Enable => &[
+            "Select Enable Petri MCP below, or press Enter.",
+            "Then restart or reload your open assistant.",
+        ],
+        McpConnectionAction::Disable => &[
+            "Petri is enabled for your assistant.",
+            "Use the button below to disconnect.",
+        ],
+        McpConnectionAction::Repair => &[
+            "Select Repair Petri MCP below, or press Enter.",
+            "Petri repairs only the connection it manages.",
+        ],
+        McpConnectionAction::Blocked => &[
+            "This connection is not managed by Petri.",
+            "Your existing settings have been left unchanged.",
+        ],
+    };
+    let heading = |label: &'static str| {
+        Line::from(Span::styled(
+            label,
+            style(cli, Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+    };
+    let body = |text: &'static str| Line::from(Span::styled(text, style(cli, Color::Gray)));
+    let divider = || {
+        Line::from(Span::styled(
+            "─".repeat(usize::from(width.min(72))),
+            style(cli, Color::DarkGray).add_modifier(Modifier::DIM),
+        ))
     };
     let mut lines = vec![
-        Line::from(Span::styled(
-            "Connect your AI agent: Claude Code, Codex, Gemini, and other supported AI agents can use Petri for markets, oracle evidence, and drafts.",
-            style(cli, Color::White),
-        )),
         Line::from(""),
+        heading("CONNECTION"),
         Line::from(Span::styled(
-            format!("Status: {status_text}"),
+            status_text,
             style(cli, status_color).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            "Enable once. It stays ready after restarts and starts with your assistant.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(Span::styled(
-            "Nothing needs to keep running while your assistant is closed.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(Span::styled(
-            "Transactions: unavailable through Petri MCP. Agents can inspect, draft, and validate only.",
-            style(cli, Color::Yellow),
-        )),
-        Line::from(Span::styled(
-            "Your key is not copied. Hosted managed signing uses canonical SDK/Spread plans directly, not this CLI subprocess.",
-            style(cli, Color::Gray),
-        )),
-        Line::from(Span::styled(action_hint, style(cli, Color::DarkGray))),
+        Line::from(""),
     ];
+    lines.extend(action_lines.iter().copied().map(body));
+    lines.extend([
+        Line::from(""),
+        divider(),
+        heading("SUPPORTED AGENTS"),
+        body("Codex / Claude Code / Gemini / other MCP clients"),
+        Line::from(""),
+        divider(),
+        heading("HOW IT WORKS"),
+        body("Starts with your assistant."),
+        body("Stays enabled after restarts."),
+        body("Nothing needs to run while your assistant is closed."),
+        Line::from(""),
+        divider(),
+        heading("YOUR WALLET"),
+        body("Agents prepare actions for your review."),
+        body("Execution requires your approval of the exact operation."),
+        body("Your wallet signs locally. Keys and recovery material stay private."),
+    ]);
     if let Some(issue) = app.mcp_connection_issue.as_deref() {
+        lines.extend([Line::from(""), divider(), heading("CONNECTION ISSUE")]);
         lines.push(Line::from(Span::styled(
             issue.to_string(),
             style(cli, Color::LightRed).add_modifier(Modifier::BOLD),
@@ -253,12 +230,8 @@ pub(in super::super) fn home_help_agent_lines(cli: &Cli, app: &LabApp) -> Vec<Li
                 style(cli, Color::Yellow).add_modifier(Modifier::BOLD),
             )));
         }
-    } else if app.mcp_connection_state == McpConnectionState::NeedsRepair {
-        lines.push(Line::from(Span::styled(
-            "Select Repair. Petri will check the runtime and owned agent settings, then rebuild only what it manages.",
-            style(cli, Color::Yellow).add_modifier(Modifier::BOLD),
-        )));
     }
+    lines.push(Line::from(""));
     lines
 }
 

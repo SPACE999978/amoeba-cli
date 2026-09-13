@@ -123,15 +123,14 @@ pub(in super::super) fn draw_staking_screen(
                 confirm,
             );
         } else {
-            let panel = Paragraph::new(scroll_lines_to_panel(
+            let panel = scrolling_panel(
                 lines,
                 layout.primary,
                 cli,
                 app.focused_panel_scroll(LabFocus::Staking),
                 focused,
-            ))
-            .block(panel_block(cli, &title, color, focused))
-            .wrap(Wrap { trim: true });
+            )
+            .block(panel_block(cli, &title, color, focused));
             frame.render_widget(panel, layout.primary);
         }
         return;

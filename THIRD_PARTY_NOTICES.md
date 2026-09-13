@@ -1,5 +1,18 @@
 # Third-party notices
 
+The September 12 source candidate also embeds a signer-free Node.js SDK runtime.
+It also compiles the compressed-evidence verifier from the SDK's immutable native
+package export. Its source inventory, lockfile and executable hashes are recorded
+inside that runtime. Compilation alone is not proof-fixture qualification; tests
+and execution qualification remain deferred. The native helper has no signing or
+network interface.
+Its exact Node version, SDK Git commit, platform, and per-file hashes are recorded
+in the embedded runtime manifest. Node's complete license (`node-LICENSE.txt`),
+the SDK's root legal files, and dependency legal files are retained in that
+runtime and extracted beneath Petri's private `sdk-runtime` directory. The Rust
+inventory below does not purport to cover that additional JavaScript dependency
+graph; packaging builds it from the pinned SDK's `package-lock.json`.
+
 Petri includes third-party Rust components. This inventory is generated from the exact locked release dependency graph. Each component remains governed by its listed license; no third-party license is replaced by the Petri Apache-2.0 license.
 
 The complete, lockfile-bound legal corpus shipped with Petri is in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). It reproduces every discovered legal file with UTF-8 line endings normalized to LF and labels the pinned SPDX text used when an upstream crate archive omits a legal file or conflicts with its declared license expression. Patched vendored sources retain their upstream license and are documented in vendor/PATCHES.md.
@@ -527,6 +540,7 @@ The complete, lockfile-bound legal corpus shipped with Petri is in [THIRD_PARTY_
 | tracing-attributes | 0.1.31 | MIT | https://github.com/tokio-rs/tracing |
 | tracing-core | 0.1.36 | MIT | https://github.com/tokio-rs/tracing |
 | try-lock | 0.2.5 | MIT | https://github.com/seanmonstar/try-lock |
+| typed-path | 0.12.3 | MIT OR Apache-2.0 | https://github.com/chipsenkbeil/typed-path |
 | typenum | 1.19.0 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
@@ -606,6 +620,7 @@ The complete, lockfile-bound legal corpus shipped with Petri is in [THIRD_PARTY_
 | zerotrie | 0.2.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec | 0.11.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec-derive | 0.11.2 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
+| zip | 8.6.0 | MIT | https://github.com/zip-rs/zip2 |
 | zmij | 1.0.21 | MIT | https://github.com/dtolnay/zmij |
 | zstd | 0.13.3 | MIT | https://github.com/gyscos/zstd-rs |
 | zstd-safe | 7.2.4 | MIT OR Apache-2.0 | https://github.com/gyscos/zstd-rs |

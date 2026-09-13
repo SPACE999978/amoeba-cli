@@ -9,12 +9,12 @@ const read = (relative) => readFileSync(path.join(root, relative), "utf8");
 const status = JSON.parse(read("release/current-governance-status.json"));
 
 const expected = Object.freeze({
-  sdk: "ac30e32bbd151d8819e4a06eafdf33570bab0eab",
+  sdk: "a21b324a7a64da87046c7650355b80ea20c47540",
   program: "2jVQSPny9eFoaG1ZWoJVAezQ5VgqJtF8rQCQXMktuBVw",
   programData: "8KR6hgcQehz32jm7CvrAriYNhvT2Bu9JuUWHce81J1oh",
   programAccountSha256: "83be84ac424d864aacf03e489ff8fe3f0a6957e8726c8f9c48f572df6b522e75",
-  programDataAccountSha256: "bcb4b3f0782b3e7ea5e741eb2da7a753efbaa8f4e61fe3c3a27e97db99d4d9ca",
-  payloadSha256: "6a47719f1c053c6727bf4e8050b1e704362c811b3d28e3a68ec02791644d4b3d",
+  programDataAccountSha256: "df5e426d74dadcca84c42e999489ad3089421fe99c4ad5fc718e4b18eee5e610",
+  payloadSha256: "903c58504f44e8820e5c9f99765b26be15a97504ec5fdd0855f3668f29927fee",
   controller: "8fhNi6QHU5TYNhoPDM4vs89ZBztnpxp3LnBXRgkBVKtx",
   gate: "Cdym9p7FvtxEAjF8XuCqSrishB7LmBDXaZGDMMgWczu",
   generationTwoGate: "CiszKKUZAUAb4DrZF8FBUJf136SVLY73d6J2MdyrinLL",
@@ -30,10 +30,10 @@ assert(status.schema === "ameba.petri.current-governance-status.v1", "wrong stat
 assert(status.packageSource?.candidateCommit === null, "self-referential candidate commit must stay null");
 assert(status.sdk?.commit === expected.sdk, "wrong SDK candidate");
 assert(status.liveDeployment?.identityGeneration === 3, "live generation must be three");
-assert(status.liveDeployment?.sourceCommit === "60d7a856f627f880a62fb93c951a1252615e1198", "V3 artifact source mismatch");
+assert(status.liveDeployment?.sourceCommit === "b1931fecff5229da232f06e9c5c43b1d6328806d", "V3 artifact source mismatch");
 assert(status.liveDeployment?.provenance === "finalized-rpc-account" &&
-  status.liveDeployment?.minimumContextSlot === 495878940 &&
-  status.liveDeployment?.finalizedObservationSlot === 495878940,
+  status.liveDeployment?.minimumContextSlot === 497359082 &&
+  status.liveDeployment?.finalizedObservationSlot === 497359082,
   "release metadata must bind the dated finalized identity capture");
 assert(status.liveDeployment?.programId === expected.program, "wrong live program");
 assert(status.liveDeployment?.programDataAddress === expected.programData, "wrong ProgramData");
@@ -60,7 +60,7 @@ assert(
   status.liveDeployment?.writeCompatibility === expected.compatibility &&
     status.writeRelease?.available === true &&
     status.writeRelease?.governedSpreadReleaseCommit === status.sourceHeads.spreadTools &&
-    status.writeRelease?.governedInstructionManifestSha256 === "3855d707429c0073d1119fb4503df084239f078c3b8a2849138c428fb0bb9d45",
+    status.writeRelease?.governedInstructionManifestSha256 === "1aed01b9e8b251a01996ac880511d84fd42db48d259d385557a38de662387736",
   "write package must bind the exact deployed V3 manifest",
 );
 assert(status.runtimePermission?.available === false && status.runtimePermission?.revalidateBeforeEveryWrite === true, "recorded state cannot grant runtime permission");

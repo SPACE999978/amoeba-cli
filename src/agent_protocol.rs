@@ -29,8 +29,7 @@ const MCP_MANIFEST_JSON: &str = r#"{
     "runtimePermission": "requires-finalized-verification",
     "historicalReaderSemanticRelease": "v0.1.0-rc.44",
     "programId": "2jVQSPny9eFoaG1ZWoJVAezQ5VgqJtF8rQCQXMktuBVw",
-    "sdkCommit": "ac30e32bbd151d8819e4a06eafdf33570bab0eab",
-    "walletChangesAvailable": false,
+    "sdkCommit": "a21b324a7a64da87046c7650355b80ea20c47540",
     "writeCompatibility": "governance-gate-v1",
     "writeErrorCode": "CURRENT_PROGRAM_WRITE_ABI_UNAVAILABLE"
   },
@@ -38,21 +37,20 @@ const MCP_MANIFEST_JSON: &str = r#"{
     "writerClose": {
       "cancelAvailability": "Writer-close cancellation is unavailable in the current action-mask boundary; the preserved CLI grammar is not an executable fallback.",
       "capabilityTool": "writers.capabilities",
-      "executionBoundary": "Inspection only. MCP only inspects. Direct CLI/TUI requires finalized V3 permission and initialized business state, even if stale capability or action-mask data appears enabled.",
+      "executionBoundary": "MCP and direct CLI/TUI require finalized V3 permission and initialized business state. MCP execution additionally binds explicit approval to the exact saved operation, plan digest and owner.",
       "availabilityBoundary": "Capability, hot/cold custody, exact owner+sleeve action masks, previews, and status remain read-only evidence. The finalized runtime gate overrides every dynamic enabled value.",
       "actionMaskTool": "writers.available_actions",
       "releaseContract": {
         "governanceGeneration": 3,
         "governanceStatus": "Active",
-        "sdkCommit": "ac30e32bbd151d8819e4a06eafdf33570bab0eab",
-        "walletChangesAvailable": false,
+        "sdkCommit": "a21b324a7a64da87046c7650355b80ea20c47540",
         "writeCompatibility": "governance-gate-v1",
         "writeErrorCode": "CURRENT_PROGRAM_WRITE_ABI_UNAVAILABLE"
       },
       "mutationStatus": "requires_finalized_runtime_permission",
       "previewTool": "writers.close_preview",
       "statusTool": "writers.close_status",
-      "workflow": "Inspect capability, exact owner+sleeve availability, preview, and status only. Explain that frozen, uninitialized or paused state prevents execution; MCP cannot start, advance, cancel, claim or transfer."
+      "workflow": "Inspect exact owner+sleeve availability and close preview. Use writers.close_begin.prepare or writers.close_advance.prepare, review the exact stage, then explicitly authorize operations.execute. Inspect close_status after each stage. Cancellation stays unavailable where the public CLI lacks current native admission."
     }
   },
   "nativeMcpServer": {
@@ -70,14 +68,14 @@ const MCP_MANIFEST_JSON: &str = r#"{
     "version": "v0"
   },
   "safety": {
-    "defaultAgentMode": "inspect_draft_validate_preview",
+    "defaultAgentMode": "inspect_prepare_review_authorized_execute_recover",
     "managedSigningBoundary": "Managed hosted execution has not been activated. Local V3 capability does not authorize managed signing.",
     "secretPolicy": "Never expose keypair JSON, .env values, Helius keys, signer tokens, or wallet credentials.",
-    "signerAccess": "Petri MCP never resolves the configured wallet, opens a local keypair, or contacts a hardware wallet. Every wallet-scoped read requires an explicit owner public key. Direct Petri mutations require finalized gate and business readiness before signer access.",
-    "signing": "Petri MCP never signs or submits transactions; direct CLI/TUI uses typed governed operations after finalized revalidation.",
-    "transactionControls": "Petri MCP exposes no approval, confirmation, transaction-signature authorization, broadcast, or execution tool. Direct CLI/TUI supports only typed SDK governed operations after finalized revalidation.",
+    "signerAccess": "wallet.address resolves the locally connected public identity. Preparation binds ownerPubkey. Only exact approved operation execution may use the local signer; keys and private salts never leave Petri.",
+    "signing": "MCP and CLI/TUI share SDK-governed execution after finalized revalidation. operations.execute requires explicit user authorization, ownerPubkey, operationId, preparedPlanDigest and approved=true.",
+    "transactionControls": "No generic signer, raw packet broadcaster, shell or arbitrary-file tool. Preparation never signs. Execution is scoped to one reviewed operation. Status recovery never replays.",
     "walletActionAvailability": "Capability and writers.available_actions are read-only evidence. The finalized runtime gate overrides every dynamic enabled value and neither surface can authorize preparation, signing, or submission.",
-    "unreleasedWriterActions": "Writer liquidity and exact collective-long claim integration are pre-testing source; current executable support requires qualified packages and fresh native admission. MCP exposes no wallet mutation."
+    "unreleasedWriterActions": "Public action parity is a source-only candidate pending integration and tests; every wallet mutation requires fresh native admission and exact user approval."
   },
   "stdioMcpServer": {
     "command": [
@@ -110,7 +108,7 @@ const MCP_MANIFEST_JSON: &str = r#"{
         "--sleeve",
         "<sleeve_pubkey>"
       ],
-      "description": "Read the exact current owner+sleeve 23-action availability mask as inspection evidence only. New writer-liquidity source is pre-testing; every wallet change needs fresh native and SDK admission.",
+      "description": "Read the exact current owner+sleeve 22-action availability mask as inspection evidence only. Every wallet change needs fresh native and SDK admission.",
       "name": "writers.available_actions",
       "status": "wired_read_only"
     },
@@ -409,7 +407,7 @@ const MCP_MANIFEST_JSON: &str = r#"{
         "--minimum-withdrawal",
         "<minimum_usdc_atoms>"
       ],
-      "description": "Inspect a staged-close preview and exact basket/withdrawal bounds. This cannot authorize or lead to current-release signing or submission.",
+      "description": "Inspect a staged-close preview and exact basket/withdrawal bounds. A preview is not authorization; prepare and explicitly approve the exact next stage separately.",
       "name": "writers.close_preview",
       "status": "wired_unsigned_preview"
     },
@@ -422,7 +420,7 @@ const MCP_MANIFEST_JSON: &str = r#"{
         "--close-request",
         "<close_request_pubkey>"
       ],
-      "description": "Read one staged writer-close request and its historical next-stage projection. Current mutation execution remains unavailable regardless of that value.",
+      "description": "Read one staged writer-close request and the next permitted stage. MCP never advances it; direct CLI/TUI requires current action-specific native admission.",
       "name": "writers.close_status",
       "status": "wired_read_only"
     },
@@ -791,6 +789,24 @@ pub(crate) fn mcp_manifest() -> Value {
         ameba_sdk::current_sdk_package_build_identity_v1().unwrap_or(Value::Null);
     manifest["currentRelease"]["packageWriteCapable"] =
         Value::Bool(crate::current_release::require_current_write_release().is_ok());
+    manifest["currentRelease"]["actionSchema"] = crate::writer_action_mask::action_schema();
+    // Dated gate observations never become an agent's live permission predicate.
+    let release: Value =
+        serde_json::from_str(include_str!("../release/current-governance-status.json"))
+            .expect("release metadata");
+    manifest["currentRelease"]["governanceStatus"] =
+        release["runtimePermission"]["gateStatus"].clone();
+    manifest["currentRelease"]["observedAt"] = release["runtimePermission"]["observedAt"].clone();
+    manifest["currentRelease"]["governanceEpoch"] =
+        release["liveGovernance"]["pinnedObservation"]["epoch"].clone();
+    manifest["humanWorkflows"]["writerClose"]["releaseContract"]["governanceStatus"] =
+        release["runtimePermission"]["gateStatus"].clone();
+    if let Some(tools) = manifest["tools"].as_array_mut() {
+        tools.push(serde_json::json!({"name":"operations.list","description":"Inspect local recovery references for an explicit owner; never resolves a signer or resubmits.","cli":["petri","--json","operations","list","--owner","<OWNER>"],"status":"wired_read_only"}));
+        if let Some(actions) = crate::mcp_actions::manifest()["tools"].as_array() {
+            tools.extend(actions.iter().cloned());
+        }
+    }
     manifest
 }
 
@@ -805,7 +821,7 @@ pub(crate) fn render_mcp_manifest(payload: &Value) -> String {
         "protocol=petri-agent-protocol.v0".to_string(),
         format!("tools={tool_count}"),
         "v0: wrap petri --json commands; v1: call shared protocol core.".to_string(),
-        "Petri MCP only inspects or drafts; it never prepares, signs, or submits transactions."
+        "Petri MCP prepares public actions and executes only explicitly approved, exact reviewed operations; signing stays local."
             .to_string(),
     ]
     .join("\n")

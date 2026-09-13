@@ -19,6 +19,8 @@ use crate::{
 
 const MAX_MARKET_DISPLAY_CHARS: usize = 256;
 const MAX_MARKET_ISSUE_CHARS: usize = 512;
+const CURRENT_PRICE_ATOMIC_SCALE: u64 = 1_000_000;
+const CURRENT_PRICE_ATOMIC_DECIMALS: u8 = 6;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OptionKind {
@@ -850,17 +852,27 @@ pub(crate) fn option_quotes_from_expiry(expiry: Option<&Value>) -> Vec<OptionQuo
         .collect()
 }
 
-fn format_atomic_decimal(value: u64, decimals: u8) -> String {
-    let scale = 10_u64.checked_pow(u32::from(decimals));
-    let Some(scale) = scale else {
-        return "-".to_string();
-    };
-    if decimals == 0 {
-        return value.to_string();
+fn format_atomic_decimal(value: u64, display_decimals: u8) -> String {
+    // Current Spread prices always use six-decimal atomic units. The market's
+    // priceDisplayDecimals controls presentation only; it is not the divisor.
+    let display_decimals = display_decimals.min(CURRENT_PRICE_ATOMIC_DECIMALS);
+    let omitted_decimals = CURRENT_PRICE_ATOMIC_DECIMALS - display_decimals;
+    let rounding_unit = 10_u64.pow(u32::from(omitted_decimals));
+    let mut whole = value / CURRENT_PRICE_ATOMIC_SCALE;
+    let remainder = value % CURRENT_PRICE_ATOMIC_SCALE;
+    let mut fraction = (remainder + rounding_unit / 2) / rounding_unit;
+    let display_scale = 10_u64.pow(u32::from(display_decimals));
+    if fraction == display_scale {
+        whole += 1;
+        fraction = 0;
     }
-    let whole = value / scale;
-    let fraction = value % scale;
-    let mut output = format!("{whole}.{fraction:0width$}", width = decimals as usize);
+    if display_decimals == 0 || fraction == 0 {
+        return whole.to_string();
+    }
+    let mut output = format!(
+        "{whole}.{fraction:0width$}",
+        width = display_decimals as usize
+    );
     while output.ends_with('0') {
         output.pop();
     }

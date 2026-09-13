@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     env,
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -16,15 +16,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use toml_edit::DocumentMut;
 
+mod discovery;
+
 pub(crate) const GUIDE_SCHEMA_VERSION: &str = "1.4";
 pub(crate) const GUIDE_RESPONSE_SCHEMA: &str =
     include_str!("../schemas/guide-response.schema.json");
 pub(crate) const GUIDE_MAX_TOOL_STEPS: u8 = 4;
 const GUIDE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const GUIDE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const GUIDE_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const GUIDE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(40);
 const GUIDE_MAX_INPUT_BYTES: usize = 20 * 1024;
 const GUIDE_MAX_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 
+const CODEX_GUIDE_MODEL: &str = "gpt-5.6-luna";
+const CODEX_GUIDE_REASONING_EFFORT: &str = "max";
+const CLAUDE_GUIDE_MODEL: &str = "claude-sonnet-5";
+const GEMINI_GUIDE_MODEL: &str = "gemini-3.5-flash";
 const CODEX_REQUIRED_TOOL_FEATURES: &[&str] = &["shell_tool", "unified_exec"];
 const GUIDE_PROCESS_CHANNEL_CAPACITY: usize = 16;
 const GUIDE_PROCESS_READ_CHUNK_BYTES: usize = 8 * 1024;
@@ -250,16 +257,41 @@ pub(crate) fn detect_provider(config: &GuideConfig) -> GuideProviderStatus {
         GuideProviderPreference::ClaudeCode => probe_result_to_status(probe_claude_code()),
         GuideProviderPreference::GeminiCli => probe_result_to_status(probe_gemini_cli()),
         GuideProviderPreference::GrokBuild => probe_result_to_status(probe_grok_build()),
-        GuideProviderPreference::Auto => resolve_auto_provider(vec![
-            probe_codex(),
-            probe_claude_code(),
-            probe_gemini_cli(),
-            probe_grok_build(),
-        ]),
+        GuideProviderPreference::Auto => thread::scope(|scope| {
+            // A slow/missing provider must not serially hold up all the others.
+            // Keep the chooser's established Codex, Claude, Gemini, Grok order.
+            let probes = [
+                probe_codex,
+                probe_claude_code,
+                probe_gemini_cli,
+                probe_grok_build,
+            ]
+            .map(|probe| scope.spawn(probe));
+            resolve_auto_provider(
+                probes
+                    .into_iter()
+                    .map(|probe| {
+                        probe.join().unwrap_or_else(|_| {
+                            ProviderProbeResult::SetupRequired(
+                                "A Guide check could not finish. Press g to retry.".to_string(),
+                            )
+                        })
+                    })
+                    .collect(),
+            )
+        }),
     }
 }
 
 fn resolve_auto_provider(results: Vec<ProviderProbeResult>) -> GuideProviderStatus {
+    let issues = results
+        .iter()
+        .filter_map(|result| match result {
+            ProviderProbeResult::SetupRequired(message) => Some(message.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let mut providers = results
         .into_iter()
         .filter_map(|result| match result {
@@ -269,51 +301,109 @@ fn resolve_auto_provider(results: Vec<ProviderProbeResult>) -> GuideProviderStat
         .collect::<Vec<_>>();
     match providers.len() {
         0 => GuideProviderStatus::SetupRequired {
-            message: auto_setup_guidance(),
+            message: format!(
+                "{issues}\n\nPress g to check again. Trading and the rest of Petri remain available."
+            ),
         },
         1 => GuideProviderStatus::Connected(providers.remove(0)),
         _ => GuideProviderStatus::Choose { providers },
     }
 }
 
-fn auto_setup_guidance() -> String {
-    "Sign in to at least one supported CLI: Codex (`codex login`), Claude Code (`claude auth login`), Gemini CLI (run `gemini`), or Grok Build (`grok login`). Petri reuses local sign-in and does not collect credentials.".to_string()
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ProbeIssue {
+    Missing,
+    Launch,
+    Configuration,
+    Incompatible,
+    AuthUnknown,
+    SignedOut,
+    Timeout,
 }
 
-fn codex_setup_guidance(installed: bool) -> String {
-    match (cfg!(windows), installed) {
-        (true, true) => "Codex setup required: run `codex login`, then reopen Petri. If the detected CLI is out of date, update the Codex app or run `npm install -g @openai/codex@latest`.".to_string(),
-        (true, false) => "Codex setup required: install or open Codex (or run `npm install -g @openai/codex`), then run `codex login`. Petri will reuse that local sign-in.".to_string(),
-        (false, true) => "Codex setup required: run `codex login`, then reopen Petri. If Codex is out of date, reinstall it with `curl -fsSL https://chatgpt.com/codex/install.sh | sh`.".to_string(),
-        (false, false) => "Codex setup required: run `curl -fsSL https://chatgpt.com/codex/install.sh | sh`, then `codex login`. Petri will reuse that local sign-in.".to_string(),
+struct ProbeProgress {
+    kind: GuideProviderKind,
+    started: Instant,
+    issue: ProbeIssue,
+}
+
+impl ProbeProgress {
+    fn new(kind: GuideProviderKind) -> Self {
+        Self {
+            kind,
+            started: Instant::now(),
+            issue: ProbeIssue::Missing,
+        }
     }
-}
 
-fn claude_setup_guidance(installed: bool) -> String {
-    match (cfg!(windows), installed) {
-        (true, true) => "Claude Code setup required: run `claude auth login`, then reopen Petri.".to_string(),
-        (true, false) => "Claude Code setup required: install Claude Code using its Windows installer, then run `claude auth login`. Petri will reuse that local sign-in.".to_string(),
-        (false, true) => "Claude Code setup required: run `claude auth login`, then reopen Petri.".to_string(),
-        (false, false) => "Claude Code setup required: run `curl -fsSL https://claude.ai/install.sh | bash`, then `claude auth login`. Petri will reuse that local sign-in.".to_string(),
+    fn note(&mut self, issue: ProbeIssue) {
+        self.issue = self.issue.max(issue);
     }
-}
 
-fn gemini_setup_guidance(installed: bool) -> String {
-    if installed {
-        "Gemini CLI setup required: run `gemini`, finish Sign in with Google, then reopen Petri."
-            .to_string()
-    } else {
-        "Gemini CLI setup required: install it with `npm install -g @google/gemini-cli`, run `gemini`, and finish sign-in. Petri will reuse that local sign-in."
-            .to_string()
+    fn remaining(&mut self) -> Option<Duration> {
+        let remaining = GUIDE_DISCOVERY_TIMEOUT.saturating_sub(self.started.elapsed());
+        if remaining.is_zero() {
+            self.note(ProbeIssue::Timeout);
+            None
+        } else {
+            Some(remaining.min(GUIDE_PROBE_TIMEOUT))
+        }
     }
-}
 
-fn grok_setup_guidance(installed: bool) -> String {
-    if installed {
-        "Grok Build setup required: run `grok login`, then reopen Petri.".to_string()
-    } else {
-        "Grok Build setup required: install the official `grok` CLI, run `grok login`, then reopen Petri. Petri will reuse that local sign-in."
-            .to_string()
+    fn output(&mut self, executable: &Path, args: &[&str]) -> Option<CapturedProcessOutput> {
+        let timeout = self.remaining()?;
+        self.note(ProbeIssue::Launch);
+        let mut command = discovery::command(executable).ok()?;
+        // Checks should not load project-level config or project hooks.
+        if let Some(home) = user_home_dirs().into_iter().next() {
+            command.current_dir(home);
+        }
+        command.args(args);
+        match run_process(command, "", timeout, |_| Ok(())) {
+            Ok(output) => Some(output),
+            Err(message) => {
+                if message.contains("timed out") || message.contains("took too long") {
+                    self.note(ProbeIssue::Timeout);
+                }
+                None
+            }
+        }
+    }
+
+    fn text(&mut self, executable: &Path, args: &[&str]) -> Option<String> {
+        let output = self.output(executable, args)?;
+        if !output.status.success() {
+            self.failed_output(&output);
+            return None;
+        }
+        Some(output.text().to_string())
+    }
+
+    fn failed_output(&mut self, output: &CapturedProcessOutput) {
+        let text = format!("{}\n{}", output.stdout, output.stderr).to_ascii_lowercase();
+        if text.contains("config") || text.contains("invalid type") {
+            self.note(ProbeIssue::Configuration);
+        }
+    }
+
+    fn finish(self) -> ProviderProbeResult {
+        let name = self.kind.display_name();
+        let login = match self.kind {
+            GuideProviderKind::Codex => "codex login",
+            GuideProviderKind::ClaudeCode => "claude auth login",
+            GuideProviderKind::GeminiCli => "gemini",
+            GuideProviderKind::GrokBuild => "grok login",
+        };
+        let detail = match self.issue {
+            ProbeIssue::Missing => "CLI not found. Install it or set its Petri executable-path override.".to_string(),
+            ProbeIssue::Launch => "CLI found but could not run. Check the installation and its runtime.".to_string(),
+            ProbeIssue::Timeout => "local check timed out. Retry when the CLI is responsive.".to_string(),
+            ProbeIssue::Configuration => "CLI found but cannot read its configuration. Update or repair that CLI; signing in again is not the fix.".to_string(),
+            ProbeIssue::Incompatible => "CLI found, but this version does not expose the controls required by the Guide. Update the CLI or select another installation.".to_string(),
+            ProbeIssue::AuthUnknown => "CLI found; sign-in could not be verified. Open that CLI to check its status, then retry.".to_string(),
+            ProbeIssue::SignedOut => format!("CLI reports signed out. Run `{login}`, then press g to check again."),
+        };
+        ProviderProbeResult::SetupRequired(format!("{name}: {detail}"))
     }
 }
 
@@ -327,23 +417,25 @@ fn probe_result_to_status(result: ProviderProbeResult) -> GuideProviderStatus {
 }
 
 fn probe_codex() -> ProviderProbeResult {
-    let mut saw_healthy_install = false;
+    let mut probe = ProbeProgress::new(GuideProviderKind::Codex);
     for candidate in codex_candidates() {
-        let Some(version) = command_text(&candidate, &["--version"], GUIDE_PROBE_TIMEOUT) else {
+        if probe.remaining().is_none() {
+            break;
+        }
+        let Some(version) = probe.text(&candidate, &["--version"]) else {
             continue;
         };
         if !version.to_ascii_lowercase().contains("codex") {
             continue;
         }
-        saw_healthy_install = true;
-        let Some(help) = command_text(&candidate, &["exec", "--help"], GUIDE_PROBE_TIMEOUT) else {
+        let Some(help) = probe.text(&candidate, &["exec", "--help"]) else {
             continue;
         };
-        let Some(features) = command_text(&candidate, &["features", "list"], GUIDE_PROBE_TIMEOUT)
-        else {
+        let Some(features) = probe.text(&candidate, &["features", "list"]) else {
             continue;
         };
         let required_help = [
+            "--model",
             "--ignore-user-config",
             "--ignore-rules",
             "--disable",
@@ -352,26 +444,47 @@ fn probe_codex() -> ProviderProbeResult {
             "--skip-git-repo-check",
         ];
         if !required_help.iter().all(|flag| help.contains(flag)) {
+            probe.note(ProbeIssue::Incompatible);
             continue;
         }
         let Some(feature_states) = parse_codex_feature_states(&features) else {
+            probe.note(ProbeIssue::Incompatible);
             continue;
         };
         if !CODEX_REQUIRED_TOOL_FEATURES
             .iter()
             .all(|required| feature_states.iter().any(|(name, _)| name == required))
         {
+            probe.note(ProbeIssue::Incompatible);
             continue;
         }
-        let Some(auth) = command_text(&candidate, &["login", "status"], GUIDE_PROBE_TIMEOUT) else {
+        let Some(auth) = probe.output(&candidate, &["login", "status"]) else {
             continue;
         };
-        if !auth.to_ascii_lowercase().contains("logged in") {
+        let auth_text = format!("{}\n{}", auth.stdout, auth.stderr).to_ascii_lowercase();
+        if !auth.status.success()
+            || !auth_text
+                .lines()
+                .any(|line| line.trim().starts_with("logged in"))
+        {
+            if auth_text.contains("not logged in") || auth_text.contains("signed out") {
+                probe.note(ProbeIssue::SignedOut);
+            } else {
+                probe.failed_output(&auth);
+                if probe.issue != ProbeIssue::Configuration {
+                    probe.note(ProbeIssue::AuthUnknown);
+                }
+            }
             continue;
         }
         let codex_disable_features = feature_states
             .into_iter()
-            .filter_map(|(feature, enabled)| enabled.then_some(feature))
+            .filter_map(|(feature, enabled)| {
+                // exec ignores user config: explicitly disable required tools
+                // even when the user's feature list already marks them off.
+                (enabled || CODEX_REQUIRED_TOOL_FEATURES.contains(&feature.as_str()))
+                    .then_some(feature)
+            })
             .collect::<Vec<_>>();
         return ProviderProbeResult::Connected(GuideProviderConnection {
             kind: GuideProviderKind::Codex,
@@ -379,23 +492,26 @@ fn probe_codex() -> ProviderProbeResult {
             codex_disable_features,
         });
     }
-    ProviderProbeResult::SetupRequired(codex_setup_guidance(saw_healthy_install))
+    probe.finish()
 }
 
 fn probe_claude_code() -> ProviderProbeResult {
-    let mut saw_healthy_install = false;
+    let mut probe = ProbeProgress::new(GuideProviderKind::ClaudeCode);
     for candidate in claude_candidates() {
-        let Some(version) = command_text(&candidate, &["--version"], GUIDE_PROBE_TIMEOUT) else {
+        if probe.remaining().is_none() {
+            break;
+        }
+        let Some(version) = probe.text(&candidate, &["--version"]) else {
             continue;
         };
         if !version.to_ascii_lowercase().contains("claude") {
             continue;
         }
-        saw_healthy_install = true;
-        let Some(help) = command_text(&candidate, &["--help"], GUIDE_PROBE_TIMEOUT) else {
+        let Some(help) = probe.text(&candidate, &["--help"]) else {
             continue;
         };
         let required_help = [
+            "--model",
             "--safe-mode",
             "--tools",
             "--disallowedTools",
@@ -404,17 +520,27 @@ fn probe_claude_code() -> ProviderProbeResult {
             "--output-format",
         ];
         if !required_help.iter().all(|flag| help.contains(flag)) {
+            probe.note(ProbeIssue::Incompatible);
             continue;
         }
-        let Some(auth) = command_text(&candidate, &["auth", "status"], GUIDE_PROBE_TIMEOUT) else {
+        let Some(auth) = probe.output(&candidate, &["auth", "status"]) else {
             continue;
         };
-        let auth_lower = auth.to_ascii_lowercase();
-        if !(auth_lower.contains("loggedin\":true")
-            || auth_lower.contains("logged_in\":true")
-            || auth_lower.contains("authenticated\":true")
-            || auth_lower.contains("logged in"))
-        {
+        // Auth output is JSON, often pretty-printed. Whitespace is not a
+        // sign-in state, and a substring of "not logged in" is not success.
+        let logged_in = parse_last_json_value(&auth.stdout)
+            .or_else(|| parse_last_json_value(&auth.stderr))
+            .and_then(|value| {
+                ["loggedIn", "logged_in", "authenticated"]
+                    .into_iter()
+                    .find_map(|key| value.get(key).and_then(Value::as_bool))
+            });
+        if !auth.status.success() || logged_in != Some(true) {
+            probe.note(if logged_in == Some(false) {
+                ProbeIssue::SignedOut
+            } else {
+                ProbeIssue::AuthUnknown
+            });
             continue;
         }
         return ProviderProbeResult::Connected(GuideProviderConnection {
@@ -423,26 +549,29 @@ fn probe_claude_code() -> ProviderProbeResult {
             codex_disable_features: Vec::new(),
         });
     }
-    ProviderProbeResult::SetupRequired(claude_setup_guidance(saw_healthy_install))
+    probe.finish()
 }
 
 fn probe_gemini_cli() -> ProviderProbeResult {
-    let mut saw_healthy_install = false;
+    let mut probe = ProbeProgress::new(GuideProviderKind::GeminiCli);
     for candidate in gemini_candidates() {
-        let Some(version) = command_text(&candidate, &["--version"], GUIDE_PROBE_TIMEOUT) else {
+        if probe.remaining().is_none() {
+            break;
+        }
+        let Some(version) = probe.text(&candidate, &["--version"]) else {
             continue;
         };
         if !version.chars().any(|character| character.is_ascii_digit()) {
             continue;
         }
-        saw_healthy_install = true;
-        let Some(help) = command_text(&candidate, &["--help"], GUIDE_PROBE_TIMEOUT) else {
+        let Some(help) = probe.text(&candidate, &["--help"]) else {
             continue;
         };
         if !help.to_ascii_lowercase().contains("gemini cli") {
             continue;
         }
         let required_help = [
+            "--model",
             "--prompt",
             "--output-format",
             "--approval-mode",
@@ -452,9 +581,10 @@ fn probe_gemini_cli() -> ProviderProbeResult {
             "--skip-trust",
         ];
         if !required_help.iter().all(|flag| help.contains(flag)) {
+            probe.note(ProbeIssue::Incompatible);
             continue;
         }
-        if !gemini_auth_is_usable(&candidate) {
+        if !gemini_auth_is_usable(&candidate, &mut probe) {
             continue;
         }
         return ProviderProbeResult::Connected(GuideProviderConnection {
@@ -463,22 +593,25 @@ fn probe_gemini_cli() -> ProviderProbeResult {
             codex_disable_features: Vec::new(),
         });
     }
-    ProviderProbeResult::SetupRequired(gemini_setup_guidance(saw_healthy_install))
+    probe.finish()
 }
 
 fn probe_grok_build() -> ProviderProbeResult {
-    let mut saw_healthy_install = false;
+    let mut probe = ProbeProgress::new(GuideProviderKind::GrokBuild);
     for candidate in grok_candidates() {
-        let version = command_text(&candidate, &["version"], GUIDE_PROBE_TIMEOUT)
-            .or_else(|| command_text(&candidate, &["--version"], GUIDE_PROBE_TIMEOUT));
+        if probe.remaining().is_none() {
+            break;
+        }
+        let version = probe
+            .text(&candidate, &["version"])
+            .or_else(|| probe.text(&candidate, &["--version"]));
         let Some(version) = version else {
             continue;
         };
         if !version.chars().any(|character| character.is_ascii_digit()) {
             continue;
         }
-        saw_healthy_install = true;
-        let Some(help) = command_text(&candidate, &["--help"], GUIDE_PROBE_TIMEOUT) else {
+        let Some(help) = probe.text(&candidate, &["--help"]) else {
             continue;
         };
         if !help.to_ascii_lowercase().contains("grok") {
@@ -504,9 +637,10 @@ fn probe_grok_build() -> ProviderProbeResult {
             "--system-prompt-override",
         ];
         if !required_help.iter().all(|flag| help.contains(flag)) {
+            probe.note(ProbeIssue::Incompatible);
             continue;
         }
-        if !grok_auth_is_usable(&candidate) {
+        if !grok_auth_is_usable(&candidate, &mut probe) {
             continue;
         }
         return ProviderProbeResult::Connected(GuideProviderConnection {
@@ -515,7 +649,7 @@ fn probe_grok_build() -> ProviderProbeResult {
             codex_disable_features: Vec::new(),
         });
     }
-    ProviderProbeResult::SetupRequired(grok_setup_guidance(saw_healthy_install))
+    probe.finish()
 }
 
 fn env_value_is_set(key: &str) -> bool {
@@ -524,33 +658,72 @@ fn env_value_is_set(key: &str) -> bool {
 
 fn user_home_dirs() -> Vec<PathBuf> {
     dedupe_paths(
-        [env::var_os("USERPROFILE"), env::var_os("HOME")]
-            .into_iter()
-            .flatten()
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .collect(),
+        // std resolves the OS account home even when a GUI launch has no HOME.
+        [
+            env::var_os("HOME"),
+            env::var_os("USERPROFILE"),
+            env::home_dir().map(PathBuf::into_os_string),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .collect(),
     )
 }
 
-fn gemini_auth_is_usable(executable: &Path) -> bool {
+fn gemini_auth_is_usable(executable: &Path, probe: &mut ProbeProgress) -> bool {
+    probe.note(ProbeIssue::AuthUnknown);
     let Ok(runtime) = guide_runtime_dir() else {
         return false;
     };
     let Ok((system_path, policy_path, settings_path)) = prepare_gemini_runtime(&runtime) else {
         return false;
     };
-    let mut command = Command::new(executable);
-    scrub_guide_environment(&mut command);
+    let Ok(mut command) = discovery::command(executable) else {
+        return false;
+    };
     configure_gemini_environment(&mut command, &system_path, &settings_path);
     configure_gemini_command(&mut command, &runtime, &policy_path, "json", None);
-    run_process(command, "", GUIDE_PROBE_TIMEOUT, |_| Ok(()))
-        .ok()
-        .and_then(|output| output.status.code())
-        == Some(42)
+    let Some(timeout) = probe.remaining() else {
+        return false;
+    };
+    match run_process(command, "", timeout, |_| Ok(())) {
+        Ok(output) => {
+            let message = format!("{}\n{}", output.stdout, output.stderr).to_ascii_lowercase();
+            // Gemini can emit the empty-input exit code even after an earlier
+            // auth failure. Require its affirmative cached-session result too;
+            // a credential file or environment variable alone is not proof.
+            let verified_session = message.contains("loaded cached credentials")
+                || message.contains("authentication successful");
+            if output.status.code() == Some(42)
+                && message.contains("no input")
+                && verified_session
+                && !message.contains("error authenticating")
+            {
+                return true;
+            }
+            if message.contains("not logged in")
+                || message.contains("no authentication method")
+                || message.contains("please set an auth method")
+                || message.contains("manual authorization is required")
+            {
+                probe.note(ProbeIssue::SignedOut);
+            }
+            false
+        }
+        Err(message) => {
+            if message.contains("took too long") {
+                probe.note(ProbeIssue::Timeout);
+            }
+            false
+        }
+    }
 }
 
-fn grok_auth_is_usable(executable: &Path) -> bool {
+fn grok_auth_is_usable(executable: &Path, probe: &mut ProbeProgress) -> bool {
+    probe.note(ProbeIssue::AuthUnknown);
     let Ok(runtime) = guide_runtime_dir() else {
         return false;
     };
@@ -581,8 +754,9 @@ fn grok_auth_is_usable(executable: &Path) -> bool {
         }
     });
     let input = format!("{initialize}\n{authenticate}\n");
-    let mut command = Command::new(executable);
-    scrub_guide_environment(&mut command);
+    let Ok(mut command) = discovery::command(executable) else {
+        return false;
+    };
     configure_grok_environment(&mut command);
     command
         .current_dir(&runtime)
@@ -590,7 +764,10 @@ fn grok_auth_is_usable(executable: &Path) -> bool {
         .arg("agent")
         .arg("--no-leader")
         .arg("stdio");
-    let Ok(output) = run_process(command, &input, GUIDE_PROBE_TIMEOUT, |_| Ok(())) else {
+    let Some(timeout) = probe.remaining() else {
+        return false;
+    };
+    let Ok(output) = run_process(command, &input, timeout, |_| Ok(())) else {
         return false;
     };
     if !output.status.success() {
@@ -645,7 +822,11 @@ fn parse_codex_feature_states(output: &str) -> Option<Vec<(String, bool)>> {
         };
         if !name
             .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            || !name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
+            })
         {
             return None;
         }
@@ -655,127 +836,19 @@ fn parse_codex_feature_states(output: &str) -> Option<Vec<(String, bool)>> {
 }
 
 fn codex_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = env::var_os("PETRI_CODEX_CLI").filter(|path| !path.is_empty()) {
-        candidates.push(PathBuf::from(path));
-    }
-    candidates.extend(path_executable_candidates("codex"));
-    candidates.push(PathBuf::from("codex"));
-    if let Some(codex_home) = env::var_os("CODEX_HOME")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-    {
-        candidates.push(codex_home.join("plugins/.plugin-appserver/codex"));
-    }
-    candidates.push(PathBuf::from(
-        "/Applications/ChatGPT.app/Contents/Resources/codex",
-    ));
-    if let Some(home) = env::var_os("HOME") {
-        candidates
-            .push(PathBuf::from(home).join("Applications/ChatGPT.app/Contents/Resources/codex"));
-    }
-    candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
-    candidates.push(PathBuf::from("/usr/local/bin/codex"));
-    dedupe_paths(candidates)
+    discovery::candidates(GuideProviderKind::Codex)
 }
 
 fn claude_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = env::var_os("PETRI_CLAUDE_CLI").filter(|path| !path.is_empty()) {
-        candidates.push(PathBuf::from(path));
-    }
-    candidates.extend(path_executable_candidates("claude"));
-    candidates.push(PathBuf::from("claude"));
-    if let Some(home) = env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        candidates.push(home.join(".local/bin/claude"));
-        candidates.push(home.join(".claude/local/claude"));
-    }
-    candidates.push(PathBuf::from("/opt/homebrew/bin/claude"));
-    candidates.push(PathBuf::from("/usr/local/bin/claude"));
-    dedupe_paths(candidates)
+    discovery::candidates(GuideProviderKind::ClaudeCode)
 }
 
 fn gemini_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = env::var_os("PETRI_GEMINI_CLI").filter(|path| !path.is_empty()) {
-        candidates.push(PathBuf::from(path));
-    }
-    candidates.extend(path_executable_candidates("gemini"));
-    candidates.push(PathBuf::from("gemini"));
-    candidates.push(PathBuf::from("/opt/homebrew/bin/gemini"));
-    candidates.push(PathBuf::from("/usr/local/bin/gemini"));
-    candidates.push(PathBuf::from("/opt/local/bin/gemini"));
-    candidates.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/gemini"));
-    dedupe_paths(candidates)
+    discovery::candidates(GuideProviderKind::GeminiCli)
 }
 
 fn grok_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = env::var_os("PETRI_GROK_CLI").filter(|path| !path.is_empty()) {
-        candidates.push(PathBuf::from(path));
-    }
-    candidates.extend(path_executable_candidates("grok"));
-    candidates.push(PathBuf::from("grok"));
-    if let Some(bin) = env::var_os("GROK_BIN_DIR").filter(|path| !path.is_empty()) {
-        candidates.extend(executable_candidates_in_dir(&PathBuf::from(bin), "grok"));
-    }
-    if let Some(home) = env::var_os("GROK_HOME").filter(|path| !path.is_empty()) {
-        candidates.extend(executable_candidates_in_dir(
-            &PathBuf::from(home).join("bin"),
-            "grok",
-        ));
-    }
-    for home in user_home_dirs() {
-        candidates.extend(executable_candidates_in_dir(
-            &home.join(".grok").join("bin"),
-            "grok",
-        ));
-        candidates.extend(executable_candidates_in_dir(
-            &home.join(".local").join("bin"),
-            "grok",
-        ));
-    }
-    candidates.push(PathBuf::from("/opt/homebrew/bin/grok"));
-    candidates.push(PathBuf::from("/usr/local/bin/grok"));
-    dedupe_paths(candidates)
-}
-
-fn path_executable_candidates(command: &str) -> Vec<PathBuf> {
-    path_executable_candidates_from(command, env::var_os("PATH"))
-}
-
-fn executable_candidates_in_dir(directory: &Path, command: &str) -> Vec<PathBuf> {
-    executable_names(command)
-        .into_iter()
-        .map(|name| directory.join(name))
-        .collect()
-}
-
-fn executable_names(command: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![
-            format!("{command}.exe"),
-            command.to_string(),
-            format!("{command}.cmd"),
-            format!("{command}.bat"),
-        ]
-    } else {
-        vec![command.to_string()]
-    }
-}
-
-fn path_executable_candidates_from(command: &str, path: Option<OsString>) -> Vec<PathBuf> {
-    let Some(path) = path else {
-        return Vec::new();
-    };
-    let names = executable_names(command);
-    let candidates = env::split_paths(&path)
-        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
-        .filter(|candidate| candidate.is_file())
-        .collect::<Vec<_>>();
-    dedupe_paths(candidates)
+    discovery::candidates(GuideProviderKind::GrokBuild)
 }
 
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -1435,20 +1508,77 @@ fn ask_with_codex(
     let schema_path = runtime.join("guide-response.schema.json");
     write_private_file(&schema_path, GUIDE_RESPONSE_SCHEMA.as_bytes())?;
 
-    let mut command = Command::new(&connection.executable);
-    scrub_guide_environment(&mut command);
-    configure_codex_command(
-        &mut command,
+    let started = Instant::now();
+    let mut attempt = run_codex_attempt(
         connection,
         &runtime,
         &schema_path,
         resume_session.as_deref(),
-    );
+        &prompt,
+        true,
+        GUIDE_REQUEST_TIMEOUT,
+        progress,
+    )?;
+    if !attempt.output.status.success() && codex_preferred_model_unavailable(&attempt.output) {
+        let remaining = GUIDE_REQUEST_TIMEOUT
+            .checked_sub(started.elapsed())
+            .unwrap_or(Duration::from_millis(1));
+        attempt = run_codex_attempt(
+            connection,
+            &runtime,
+            &schema_path,
+            resume_session.as_deref(),
+            &prompt,
+            false,
+            remaining,
+            progress,
+        )?;
+    }
+    if !attempt.output.status.success() {
+        return Err(provider_failure_message(
+            GuideProviderKind::Codex,
+            &attempt.output,
+        ));
+    }
+    let raw = attempt
+        .final_message
+        .ok_or_else(|| "Codex could not answer right now. Please try again.".to_string())?;
+    Ok(GuideProviderReply {
+        response: parse_guide_response_json(&raw)?,
+        session_id: attempt.next_session_id,
+    })
+}
 
+struct CodexAttempt {
+    output: CapturedProcessOutput,
+    final_message: Option<String>,
+    next_session_id: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_codex_attempt(
+    connection: &GuideProviderConnection,
+    runtime: &Path,
+    schema_path: &Path,
+    session_id: Option<&str>,
+    prompt: &str,
+    use_preferred_model: bool,
+    timeout: Duration,
+    progress: &mut dyn FnMut(GuideStreamEvent),
+) -> Result<CodexAttempt, String> {
+    let mut command = discovery::command(&connection.executable)?;
+    configure_codex_command(
+        &mut command,
+        connection,
+        runtime,
+        schema_path,
+        session_id,
+        use_preferred_model,
+    );
     let mut final_message = None;
-    let mut next_session_id = resume_session;
+    let mut next_session_id = session_id.map(str::to_string);
     let mut saw_thinking = false;
-    let output = run_process(command, &prompt, GUIDE_REQUEST_TIMEOUT, |line| {
+    let output = run_process(command, prompt, timeout, |line| {
         let event = serde_json::from_str::<Value>(line).map_err(|_| {
             "The guide provider returned an unexpected event. No action was taken.".to_string()
         })?;
@@ -1487,14 +1617,10 @@ fn ask_with_codex(
         }
         Ok(())
     })?;
-    if !output.status.success() {
-        return Err(provider_failure_message(GuideProviderKind::Codex, &output));
-    }
-    let raw = final_message
-        .ok_or_else(|| "Codex could not answer right now. Please try again.".to_string())?;
-    Ok(GuideProviderReply {
-        response: parse_guide_response_json(&raw)?,
-        session_id: next_session_id,
+    Ok(CodexAttempt {
+        output,
+        final_message,
+        next_session_id,
     })
 }
 
@@ -1504,6 +1630,7 @@ fn configure_codex_command(
     runtime: &Path,
     schema_path: &Path,
     session_id: Option<&str>,
+    use_preferred_model: bool,
 ) {
     command.current_dir(runtime);
     command
@@ -1516,6 +1643,15 @@ fn configure_codex_command(
         .arg("--sandbox")
         .arg("read-only");
     add_codex_tool_isolation(command, connection);
+    if use_preferred_model {
+        command
+            .arg("--model")
+            .arg(CODEX_GUIDE_MODEL)
+            .arg("-c")
+            .arg(format!(
+                "model_reasoning_effort=\"{CODEX_GUIDE_REASONING_EFFORT}\""
+            ));
+    }
     command
         .arg("-c")
         .arg("tools.web_search=false")
@@ -1547,30 +1683,8 @@ fn ask_with_claude_code(
     progress(GuideStreamEvent::Started);
     let prompt = guide_prompt(request)?;
     let resume_session = validated_resume_session(session_id)?;
-    let mut command = Command::new(&connection.executable);
-    scrub_guide_environment(&mut command);
-    command
-        .arg("-p")
-        .arg("--safe-mode")
-        .arg("--tools")
-        .arg("")
-        .arg("--disallowedTools")
-        .arg("*")
-        .arg("--strict-mcp-config")
-        .arg("--mcp-config")
-        .arg("{\"mcpServers\":{}}")
-        .arg("--disable-slash-commands")
-        .arg("--permission-mode")
-        .arg("dontAsk")
-        .arg("--max-turns")
-        .arg("1")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--json-schema")
-        .arg(GUIDE_RESPONSE_SCHEMA);
-    if let Some(session_id) = resume_session.as_deref() {
-        command.arg("--resume").arg(session_id);
-    }
+    let mut command = discovery::command(&connection.executable)?;
+    configure_claude_command(&mut command, resume_session.as_deref());
     progress(GuideStreamEvent::Thinking);
     let output = run_process(command, &prompt, GUIDE_REQUEST_TIMEOUT, |_| Ok(()))?;
     if !output.status.success() {
@@ -1604,6 +1718,33 @@ fn ask_with_claude_code(
     })
 }
 
+fn configure_claude_command(command: &mut Command, session_id: Option<&str>) {
+    command
+        .arg("-p")
+        .arg("--model")
+        .arg(CLAUDE_GUIDE_MODEL)
+        .arg("--safe-mode")
+        .arg("--tools")
+        .arg("")
+        .arg("--disallowedTools")
+        .arg("*")
+        .arg("--strict-mcp-config")
+        .arg("--mcp-config")
+        .arg("{\"mcpServers\":{}}")
+        .arg("--disable-slash-commands")
+        .arg("--permission-mode")
+        .arg("dontAsk")
+        .arg("--max-turns")
+        .arg("1")
+        .arg("--output-format")
+        .arg("json")
+        .arg("--json-schema")
+        .arg(GUIDE_RESPONSE_SCHEMA);
+    if let Some(session_id) = session_id {
+        command.arg("--resume").arg(session_id);
+    }
+}
+
 fn ask_with_gemini_cli(
     connection: &GuideProviderConnection,
     request: &GuideRequest,
@@ -1616,8 +1757,7 @@ fn ask_with_gemini_cli(
     let runtime = guide_runtime_dir()?;
     let (system_path, policy_path, settings_path) = prepare_gemini_runtime(&runtime)?;
 
-    let mut command = Command::new(&connection.executable);
-    scrub_guide_environment(&mut command);
+    let mut command = discovery::command(&connection.executable)?;
     configure_gemini_environment(&mut command, &system_path, &settings_path);
     configure_gemini_command(
         &mut command,
@@ -1708,8 +1848,7 @@ fn ask_with_grok_build(
     let prompt_path = runtime.join("grok-prompt.txt");
     write_private_file(&prompt_path, prompt.as_bytes())?;
 
-    let mut command = Command::new(&connection.executable);
-    scrub_guide_environment(&mut command);
+    let mut command = discovery::command(&connection.executable)?;
     configure_grok_environment(&mut command);
     configure_grok_command(
         &mut command,
@@ -1773,6 +1912,8 @@ fn configure_gemini_command(
 ) {
     command
         .current_dir(runtime)
+        .arg("--model")
+        .arg(GEMINI_GUIDE_MODEL)
         .arg("--prompt")
         .arg("")
         .arg("--output-format")
@@ -1897,6 +2038,7 @@ fn configure_gemini_environment(command: &mut Command, system_path: &Path, setti
     );
     command
         .env("NO_BROWSER", "true")
+        .env("GEMINI_CLI_NO_RELAUNCH", "1")
         .env("GEMINI_SYSTEM_MD", system_path)
         .env("GEMINI_CLI_SYSTEM_SETTINGS_PATH", settings_path);
 }
@@ -1960,9 +2102,25 @@ fn codex_event_is_allowed(event: &Value) -> bool {
             .get("item")
             .and_then(|item| item.get("type"))
             .and_then(Value::as_str)
-            .is_some_and(|kind| matches!(kind, "agent_message" | "reasoning")),
+            .is_some_and(|kind| matches!(kind, "agent_message" | "reasoning" | "error")),
         _ => false,
     }
+}
+
+fn codex_preferred_model_unavailable(output: &CapturedProcessOutput) -> bool {
+    let text = format!("{}\n{}", output.stdout, output.stderr).to_ascii_lowercase();
+    codex_preferred_model_error(&text)
+}
+
+fn codex_preferred_model_error(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    let mentions_preferred_model = text.contains(&CODEX_GUIDE_MODEL.to_ascii_lowercase());
+    let model_is_unavailable = text.contains("requires a newer version of codex")
+        || text.contains("unknown model")
+        || (text.contains("model metadata") && text.contains("not found"));
+    let reasoning_is_unavailable = text.contains("model_reasoning_effort")
+        && (text.contains("unsupported") || text.contains("invalid"));
+    (mentions_preferred_model && model_is_unavailable) || reasoning_is_unavailable
 }
 
 fn scrub_guide_environment(command: &mut Command) {
@@ -1993,7 +2151,21 @@ fn guide_environment_key_allowed(key: &OsStr) -> bool {
             | "LOCALAPPDATA"
             | "XDG_CONFIG_HOME"
             | "XDG_CACHE_HOME"
+            | "XDG_DATA_HOME"
+            | "XDG_RUNTIME_DIR"
+            | "DBUS_SESSION_BUS_ADDRESS"
+            | "GNOME_KEYRING_CONTROL"
+            | "VOLTA_HOME"
+            | "PNPM_HOME"
+            | "NVM_DIR"
+            | "NVM_HOME"
+            | "NVM_SYMLINK"
+            | "FNM_DIR"
+            | "MISE_DATA_DIR"
+            | "ASDF_DATA_DIR"
+            | "BUN_INSTALL"
             | "CODEX_HOME"
+            | "CODEX_CA_CERTIFICATE"
             | "CLAUDE_CONFIG_DIR"
             | "LANG"
             | "LC_ALL"
@@ -2052,24 +2224,20 @@ fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn command_text(executable: &Path, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut command = Command::new(executable);
-    scrub_guide_environment(&mut command);
-    command.args(args);
-    let output = run_process(command, "", timeout, |_| Ok(())).ok()?;
-    output.status.success().then(|| {
-        if output.stdout.trim().is_empty() {
-            output.stderr
-        } else {
-            output.stdout
-        }
-    })
-}
-
 struct CapturedProcessOutput {
     status: ExitStatus,
     stdout: String,
     stderr: String,
+}
+
+impl CapturedProcessOutput {
+    fn text(&self) -> &str {
+        if self.stdout.trim().is_empty() {
+            &self.stderr
+        } else {
+            &self.stdout
+        }
+    }
 }
 
 enum ProcessChunk {
@@ -2269,9 +2437,8 @@ fn provider_failure_message(kind: GuideProviderKind, output: &CapturedProcessOut
     if combined.contains("not logged")
         || combined.contains("login required")
         || combined.contains("login first")
-        || combined.contains("sign in")
-        || combined.contains("auth status")
-        || combined.contains("authentication")
+        || combined.contains("not authenticated")
+        || combined.contains("signed out")
     {
         return match kind {
             GuideProviderKind::Codex => {

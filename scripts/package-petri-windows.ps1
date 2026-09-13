@@ -28,6 +28,9 @@ $PackageRoot = Join-Path $OutputRoot $PackageName
 $ZipPath = Join-Path $OutputRoot "$PackageName.zip"
 
 if (-not $SkipBuild) {
+  & node (Join-Path $PSScriptRoot "build-sdk-runtime.mjs")
+  if ($LASTEXITCODE -ne 0) { throw "Pinned SDK runtime build failed" }
+  $env:PETRI_REQUIRE_SDK_RUNTIME = "1"
   $RustFlagSeparator = [char]0x1f
   $RemapFlags = @("--remap-path-prefix=$RepoRoot=.", "--remap-path-prefix=$HOME=<home>")
   foreach ($RemapFlag in $RemapFlags) {
@@ -42,6 +45,8 @@ if (-not $SkipBuild) {
     throw "cargo build --release failed with exit code $LASTEXITCODE"
   }
 }
+& node (Join-Path $PSScriptRoot "build-sdk-runtime.mjs") --verify
+if ($LASTEXITCODE -ne 0) { throw "SDK runtime metadata is not current" }
 if (-not (Test-Path -LiteralPath $ReleaseBinary)) {
   throw "Missing release binary: $ReleaseBinary"
 }
